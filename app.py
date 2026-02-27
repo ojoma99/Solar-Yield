@@ -151,23 +151,27 @@ fig.add_trace(
     go.Bar(
         x=df["Time"],
         y=df["Predicted"],
-        name="Predicted (Orange)",
-        marker_color="orange",
-        opacity=0.3,
+        name="Predicted",
+        marker=dict(
+            color="#FFFF00",  # neon yellow
+            line=dict(color="black", width=2),
+        ),
+        opacity=0.4,
     ),
     secondary_y=False,
 )
 
 if actuals:
-    df["Color"] = df.apply(
-        lambda r: "#2ecc71" if r["Actual"] >= r["Predicted"] else "#e74c3c", axis=1
-    )
     fig.add_trace(
         go.Bar(
             x=df["Time"],
             y=df["Actual"],
-            name="Actual (Yield)",
-            marker_color=df["Color"],
+            name="Actual",
+            marker=dict(
+                color="#39FF14",  # electric green
+                line=dict(color="black", width=2),
+            ),
+            opacity=0.6,
         ),
         secondary_y=False,
     )
@@ -183,6 +187,11 @@ if show_clouds:
         secondary_y=True,
     )
 
+# Fix x-axis to 24h window for the selected date
+x_start = pd.to_datetime(f"{d_str} 00:00")
+x_end = pd.to_datetime(f"{d_str} 23:59")
+fig.update_xaxes(range=[x_start, x_end])
+
 fig.update_layout(
     margin=dict(l=0, r=0, t=30, b=0),
     height=400,
@@ -192,12 +201,12 @@ fig.update_layout(
     legend=dict(
         orientation="h",
         yanchor="bottom",
-        y=1.1,            # slightly higher to avoid overlap
+        y=1.1,
         xanchor="center",
         x=0.5,
     ),
     dragmode="pan",
-    title="",             # avoid overlapping secondary title text
+    title="",
 )
 
 st.plotly_chart(
@@ -210,4 +219,4 @@ st.plotly_chart(
     },
 )
 
-st.caption("powered by Ojoma Abamu")
+st.caption("powered by ojoma abamu")
