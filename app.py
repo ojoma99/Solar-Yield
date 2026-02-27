@@ -135,19 +135,19 @@ if show_clouds:
     )
 
 fig.update_layout(
-    margin=dict(l=0, r=0, t=0, b=0),
+    margin=dict(l=0, r=0, t=30, b=0),  # minimal margins, leave room for title
+    height=400,                        # fixed height for mobile
     template="plotly_dark",
     barmode="overlay",
-    height=400,
+    hovermode="x unified",
     legend=dict(
         orientation="h",
         yanchor="bottom",
-        y=1.02,
-        xanchor="right",
-        x=1,
+        y=1.02,           # just above chart
+        xanchor="center",
+        x=0.5,
     ),
     dragmode="zoom",
-    hovermode="x unified",
     title=f"Hafenstr. 18 Performance: {d_str}",
 )
 
@@ -155,8 +155,8 @@ st.plotly_chart(
     fig,
     use_container_width=True,
     config={
-        "scrollZoom": True,
-        "displayModeBar": False,
-        "responsive": True,
+        "scrollZoom": True,      # pinch-to-zoom
+        "responsive": True,      # full-width on mobile
+        "displayModeBar": False, # cleaner UI
     },
 )
