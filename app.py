@@ -4,11 +4,12 @@ import requests
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
+import math
 
 # --- SYSTEM CONFIG ---
 SYSTEM_KWP = 8.6
 LAT, LON = 53.396, 8.136
-GROWATT_TOKEN = "00j5761b6xl70qe24c7xkit7k67bk0ql"
+GROWATT_TOKEN = "tb346b22pb1e34nhf057tcq48xkyc7aq"
 
 st.set_page_config(page_title="Varel Solar Truth", layout="wide", page_icon="⚓")
 
@@ -31,7 +32,9 @@ def get_varel_prediction(date_str: str) -> pd.DataFrame:
     - Uses Open-Meteo hourly data (GHI, tilted irradiance proxy, visibility, cloud cover)
     - Approximates Hay-Davies-style projection via global_tilted_irradiance
     - Adds harbor water-surface albedo (specular 0.36)
-    - Applies -0.30%/°C thermal coefficient and an 18% haze penalty when visibility < 15 km
+    - Applies -0.30%/°C thermal coefficient
+    - Applies an 18% haze penalty when visibility < 15 km
+    - Applies a 0.95 clarity factor on very clear hours (visibility > 15 km)
     """
     url = (
         "https://api.open-meteo.com/v1/forecast"
@@ -52,9 +55,9 @@ def get_varel_prediction(date_str: str) -> pd.DataFrame:
     clouds: list[float] = []
 
     tilt_deg = 60.0
-    tilt_rad = tilt_deg * 3.14159265 / 180.0
+    tilt_rad = math.radians(tilt_deg)
     # View factor for ground-reflected component on a tilted plane
-    ground_view = (1.0 - float(pd.np.cos(tilt_rad))) / 2.0  # type: ignore[attr-defined]
+    ground_view = (1.0 - math.cos(tilt_rad)) / 2.0
     albedo_specular = 0.36
 
     for i in range(len(res["time"])):
@@ -66,11 +69,13 @@ def get_varel_prediction(date_str: str) -> pd.DataFrame:
 
         # Haze: only penalize when visibility is clearly limited (< 15 km)
         f_haze = 0.82 if v_km < 15.0 else 1.0
+        # Clarity: slightly reduce prediction on ultra-clear hours (> 15 km)
+        f_clarity = 0.95 if v_km > 15.0 else 1.0
 
         # Water-surface specular albedo contribution (harbor reflections)
         g_ground = ghi * albedo_specular * ground_view
 
-        poa_irradiance = (gti + g_ground) * f_haze  # W/m² on plane-of-array
+        poa_irradiance = (gti + g_ground) * f_haze * f_clarity  # W/m² on plane-of-array
 
         # Thermal power coefficient based on ambient temperature
         f_temp = 1.0 + (-0.003 * (t - 25.0))
@@ -97,7 +102,7 @@ total_pre = df['Predicted'].sum()
 
 # Step B: Attempt Growatt Sync (Green/Red Bars)
 actuals = []
-sync_msg = "🔴 Offline / API Lock"
+sync_msg = "🔴 Sync Delay / No Data"
 last_sync = "N/A"
 
 try:
@@ -115,7 +120,7 @@ try:
             last_sync = datetime.now().strftime("%H:%M:%S")
 except Exception as e:
     # Quiet fail: Don't break the app, just inform the user
-    st.sidebar.warning(f"Growatt Sync Error: {e}")
+    st.sidebar.warning(f"Sync Delay: using physics-only prediction ({e})")
 
 # --- 3. DISPLAY ---
 with st.sidebar:
