@@ -8,9 +8,20 @@ from datetime import datetime
 # --- SYSTEM CONFIG ---
 SYSTEM_KWP = 8.6
 LAT, LON = 53.396, 8.136
-GROWATT_TOKEN = "00j5761b6xl70qe24c7xkit7k67bk0ql"
+GROWATT_TOKEN = "tb346b22pb1e34nhf057tcq48xkyc7aq"
 
 st.set_page_config(page_title="Varel Solar Truth", layout="wide", page_icon="⚓")
+
+# Auto-refresh every 10 minutes to avoid hitting Growatt rate limits
+st_autorefresh_ms = 10 * 60 * 1000
+try:
+    # Only import if available; avoid hard dependency breakage
+    from streamlit_autorefresh import st_autorefresh
+
+    st_autorefresh(interval=st_autorefresh_ms, key="abamu_autorefresh")
+except Exception:
+    # If the helper isn't installed, skip auto-refresh gracefully
+    pass
 
 # --- 1. PHYSICS ENGINE (ALWAYS AVAILABLE) ---
 def get_varel_prediction(date_str):
