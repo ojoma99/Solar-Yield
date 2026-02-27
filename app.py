@@ -7,8 +7,8 @@ import plotly.io as pio
 from datetime import datetime
 import math
 
-# Force a light Plotly theme so bars don't render black
-pio.templates.default = "plotly"
+# Force a dark Plotly theme with explicit colors
+pio.templates.default = "plotly_dark"
 
 # --- SYSTEM CONFIG ---
 SYSTEM_KWP = 8.6
@@ -156,8 +156,9 @@ st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
 
 # --- 4. THE HISTOGRAM ---
 from plotly.subplots import make_subplots
-fig = make_subplots(specs=[[{"secondary_y": True}]])
+fig = go.Figure()
 
+# Predicted yield bars (single y-axis)
 fig.add_trace(
     go.Bar(
         x=df["Time"],
@@ -165,13 +166,13 @@ fig.add_trace(
         name="Predicted",
         marker=dict(
             color=PREDICTED_COLOR,
-            line=dict(color="black", width=1.5),
+            line=dict(color="black", width=1),
         ),
-        opacity=0.4,
-    ),
-    secondary_y=False,
+        opacity=0.5,
+    )
 )
 
+# Optional actual yield overlay
 if actuals:
     fig.add_trace(
         go.Bar(
@@ -180,27 +181,27 @@ if actuals:
             name="Actual",
             marker=dict(
                 color=ACTUAL_COLOR,
-                line=dict(color="black", width=1.5),
+                line=dict(color="black", width=1),
             ),
-            opacity=0.6,
-        ),
-        secondary_y=False,
+            opacity=0.8,
+        )
     )
 
-if show_clouds:
-    fig.add_trace(
-        go.Scatter(
-            x=df["Time"],
-            y=df["Cloud_Cover"],
-            name="Cloud %",
-            line=dict(color="#3498db", width=2),
-        ),
-        secondary_y=True,
+# Cloud data kept in legend via an invisible trace (no clutter on chart)
+fig.add_trace(
+    go.Scatter(
+        x=df["Time"],
+        y=df["Cloud_Cover"],
+        name="Cloud %",
+        mode="lines",
+        line=dict(color="#3498db", width=2),
+        visible="legendonly",
     )
+)
 
-# --- 24 Hour Logic ---
+# --- Focus Window: 07:00–21:00 ---
 fig.update_xaxes(
-    range=[f"{d_str} 00:00", f"{d_str} 23:59"],
+    range=[f"{d_str} 07:00", f"{d_str} 21:00"],
     type="date",
     dtick=3600000 * 3,
     tickformat="%H:%M",
@@ -210,13 +211,13 @@ fig.update_xaxes(
 fig.update_layout(
     margin=dict(l=0, r=0, t=40, b=0),
     height=400,
-    template="plotly",
+    template="plotly_dark",
     barmode="overlay",
     hovermode="x unified",
     legend=dict(
         orientation="h",
         yanchor="bottom",
-        y=1.2,
+        y=1.1,
         xanchor="center",
         x=0.5,
     ),
