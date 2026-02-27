@@ -3,8 +3,12 @@ import growattServer
 import requests
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.io as pio
 from datetime import datetime
 import math
+
+# Force a light Plotly theme so bars don't render black
+pio.templates.default = "plotly"
 
 # --- SYSTEM CONFIG ---
 SYSTEM_KWP = 8.6
@@ -203,7 +207,7 @@ fig.update_xaxes(
 fig.update_layout(
     margin=dict(l=0, r=0, t=40, b=0),
     height=400,
-    template="plotly_dark",
+    template="plotly",
     barmode="overlay",
     hovermode="x unified",
     legend=dict(
@@ -222,8 +226,7 @@ st.plotly_chart(
     use_container_width=True,
     config={
         "scrollZoom": True,
-        "displayModeBar": False,
     },
 )
 
-st.caption("powered by ojoma abamu")
+st.caption("Powered by Ojoma Abamu")
