@@ -16,7 +16,7 @@ LAT, LON = 53.396, 8.136
 GROWATT_TOKEN = "tb346b22pb1e34nhf057tcq48xkyc7aq"
 
 # --- High Contrast Sunlight Theme ---
-PREDICTED_COLOR = "#FFFF00"  # Neon Yellow
+PREDICTED_COLOR = "#FFA500"  # Orange
 ACTUAL_COLOR = "#39FF14"     # Electric Green
 
 st.set_page_config(page_title="Varel Solar Truth", layout="wide", page_icon="⚓")
