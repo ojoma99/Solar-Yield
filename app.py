@@ -11,6 +11,10 @@ SYSTEM_KWP = 8.6
 LAT, LON = 53.396, 8.136
 GROWATT_TOKEN = "tb346b22pb1e34nhf057tcq48xkyc7aq"
 
+# --- High Contrast Sunlight Theme ---
+PREDICTED_COLOR = "#FFFF00"  # Neon Yellow
+ACTUAL_COLOR = "#39FF14"     # Electric Green
+
 st.set_page_config(page_title="Varel Solar Truth", layout="wide", page_icon="⚓")
 
 # Auto-refresh every 10 minutes to avoid hitting Growatt rate limits
@@ -153,7 +157,7 @@ fig.add_trace(
         y=df["Predicted"],
         name="Predicted",
         marker=dict(
-            color="#FFFF00",  # neon yellow
+            color=PREDICTED_COLOR,
             line=dict(color="black", width=2),
         ),
         opacity=0.4,
@@ -168,7 +172,7 @@ if actuals:
             y=df["Actual"],
             name="Actual",
             marker=dict(
-                color="#39FF14",  # electric green
+                color=ACTUAL_COLOR,
                 line=dict(color="black", width=2),
             ),
             opacity=0.6,
@@ -187,13 +191,17 @@ if show_clouds:
         secondary_y=True,
     )
 
-# Fix x-axis to 24h window for the selected date
-x_start = pd.to_datetime(f"{d_str} 00:00")
-x_end = pd.to_datetime(f"{d_str} 23:59")
-fig.update_xaxes(range=[x_start, x_end])
+# --- 24 Hour Logic ---
+fig.update_xaxes(
+    range=[f"{d_str} 00:00", f"{d_str} 23:59"],
+    type="date",
+    dtick=3600000 * 3,
+    tickformat="%H:%M",
+)
 
+# --- Interaction & Layout ---
 fig.update_layout(
-    margin=dict(l=0, r=0, t=30, b=0),
+    margin=dict(l=0, r=0, t=40, b=0),
     height=400,
     template="plotly_dark",
     barmode="overlay",
@@ -215,7 +223,6 @@ st.plotly_chart(
     config={
         "scrollZoom": True,
         "displayModeBar": False,
-        "responsive": True,
     },
 )
 
