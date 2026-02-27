@@ -135,9 +135,10 @@ if show_clouds:
     )
 
 fig.update_layout(
-    margin=dict(l=10, r=10, t=50, b=10),
+    margin=dict(l=0, r=0, t=0, b=0),
     template="plotly_dark",
     barmode="overlay",
+    height=400,
     legend=dict(
         orientation="h",
         yanchor="bottom",
