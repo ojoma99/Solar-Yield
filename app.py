@@ -184,28 +184,30 @@ if show_clouds:
     )
 
 fig.update_layout(
-    margin=dict(l=0, r=0, t=30, b=0),  # minimal margins, leave room for title
-    height=400,                        # fixed height for mobile
+    margin=dict(l=0, r=0, t=30, b=0),
+    height=400,
     template="plotly_dark",
     barmode="overlay",
     hovermode="x unified",
     legend=dict(
         orientation="h",
         yanchor="bottom",
-        y=1.02,           # just above chart
+        y=1.1,            # slightly higher to avoid overlap
         xanchor="center",
         x=0.5,
     ),
-    dragmode="zoom",
-    title=f"Hafenstr. 18 Performance: {d_str}",
+    dragmode="pan",
+    title="",             # avoid overlapping secondary title text
 )
 
 st.plotly_chart(
     fig,
     use_container_width=True,
     config={
-        "scrollZoom": True,      # pinch-to-zoom
-        "responsive": True,      # full-width on mobile
-        "displayModeBar": False, # cleaner UI
+        "scrollZoom": True,
+        "displayModeBar": False,
+        "responsive": True,
     },
 )
+
+st.caption("powered by Ojoma Abamu")
