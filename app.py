@@ -141,15 +141,18 @@ m1, m2, m3 = st.columns(3)
 m1.metric("Predicted Total", f"{total_pre:.2f} kWh")
 
 if actuals:
-    df = df.iloc[:len(actuals)] # Align lengths
-    df['Actual'] = actuals
-    df['Diff'] = df['Actual'] - df['Predicted']
+    df = df.iloc[:len(actuals)]  # Align lengths
+    df["Actual"] = actuals
+    df["Diff"] = df["Actual"] - df["Predicted"]
     total_act = sum(actuals)
     m2.metric("Actual Today", f"{total_act:.2f} kWh")
-    m3.metric("Health Score", f"{(total_act/total_pre*100):.1f}%")
+    m3.metric("Health Score", f"{(total_act / total_pre * 100):.1f}%")
 else:
     m2.metric("Actual Today", "0.00 kWh (Waiting...)")
     m3.metric("Health Score", "N/A")
+
+# Spacer between metrics and chart for legend/modebar
+st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
 
 # --- 4. THE HISTOGRAM ---
 from plotly.subplots import make_subplots
@@ -213,11 +216,12 @@ fig.update_layout(
     legend=dict(
         orientation="h",
         yanchor="bottom",
-        y=1.1,
+        y=1.15,
         xanchor="center",
         x=0.5,
     ),
     dragmode="pan",
+    modebar=dict(orientation="v", bgcolor="rgba(0,0,0,0)"),
     title="",
 )
 
