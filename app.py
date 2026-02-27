@@ -16,8 +16,8 @@ LAT, LON = 53.396, 8.136
 GROWATT_TOKEN = "tb346b22pb1e34nhf057tcq48xkyc7aq"
 
 # --- High Contrast Sunlight Theme ---
-PREDICTED_COLOR = "#FFA500"  # Orange
-ACTUAL_COLOR = "#39FF14"     # Electric Green
+PREDICTED_COLOR = "#39FF14"  # Electric Green (Predicted)
+ACTUAL_COLOR = "#39FF14"     # Electric Green (Actual)
 
 st.set_page_config(page_title="Varel Solar Truth", layout="wide", page_icon="⚓")
 
@@ -165,7 +165,7 @@ fig.add_trace(
         name="Predicted",
         marker=dict(
             color=PREDICTED_COLOR,
-            line=dict(color="black", width=2),
+            line=dict(color="black", width=1.5),
         ),
         opacity=0.4,
     ),
@@ -180,7 +180,7 @@ if actuals:
             name="Actual",
             marker=dict(
                 color=ACTUAL_COLOR,
-                line=dict(color="black", width=2),
+                line=dict(color="black", width=1.5),
             ),
             opacity=0.6,
         ),
@@ -216,7 +216,7 @@ fig.update_layout(
     legend=dict(
         orientation="h",
         yanchor="bottom",
-        y=1.15,
+        y=1.2,
         xanchor="center",
         x=0.5,
     ),
