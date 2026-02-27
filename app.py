@@ -24,21 +24,65 @@ except Exception:
     pass
 
 # --- 1. PHYSICS ENGINE (ALWAYS AVAILABLE) ---
-def get_varel_prediction(date_str):
-    # Fetching Weather for Varel Harbor
-    url = f"https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&hourly=temperature_2m,shortwave_radiation,visibility,cloud_cover&timezone=Europe%2FBerlin&start_date={date_str}&end_date={date_str}"
-    res = requests.get(url).json()['hourly']
-    
-    times = pd.date_range(start=f"{date_str} 00:00", end=f"{date_str} 23:55", freq='5min')
-    preds, clouds = [], []
-    for i in range(len(res['time'])):
-        # Model: Temp Coeff + Harbor Haze (18% penalty) + 60° SW Tilt
-        t, irr, v, c = res['temperature_2m'][i], res['shortwave_radiation'][i], res['visibility'][i]/1000, res['cloud_cover'][i]
-        f_temp = 1 + (-0.003 * (t - 25))
-        f_haze = 0.82 if v < 12 else 1.0
-        f_angle = 0.92 
-        val = (irr / 1000) * SYSTEM_KWP * f_temp * f_haze * f_angle / 12
-        for _ in range(12): preds.append(max(0, val)); clouds.append(c)
+def get_varel_prediction(date_str: str) -> pd.DataFrame:
+    """
+    Physics model for Abamu Residence (Hafenstr. 18).
+
+    - Uses Open-Meteo hourly data (GHI, tilted irradiance proxy, visibility, cloud cover)
+    - Approximates Hay-Davies-style projection via global_tilted_irradiance
+    - Adds harbor water-surface albedo (specular 0.36)
+    - Applies -0.30%/°C thermal coefficient and an 18% haze penalty when visibility < 15 km
+    """
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={LAT}&longitude={LON}"
+        "&hourly=temperature_2m,shortwave_radiation,global_tilted_irradiance,visibility,cloud_cover"
+        "&timezone=Europe%2FBerlin"
+        f"&start_date={date_str}&end_date={date_str}"
+    )
+    res = requests.get(url).json()["hourly"]
+
+    times = pd.date_range(
+        start=f"{date_str} 00:00",
+        end=f"{date_str} 23:55",
+        freq="5min",
+    )
+
+    preds: list[float] = []
+    clouds: list[float] = []
+
+    tilt_deg = 60.0
+    tilt_rad = tilt_deg * 3.14159265 / 180.0
+    # View factor for ground-reflected component on a tilted plane
+    ground_view = (1.0 - float(pd.np.cos(tilt_rad))) / 2.0  # type: ignore[attr-defined]
+    albedo_specular = 0.36
+
+    for i in range(len(res["time"])):
+        t = res["temperature_2m"][i]           # °C
+        ghi = res["shortwave_radiation"][i]    # W/m², horizontal
+        gti = res["global_tilted_irradiance"][i]  # W/m², already on 60° plane (Open-Meteo model)
+        v_km = res["visibility"][i] / 1000.0
+        c = res["cloud_cover"][i]
+
+        # Haze: only penalize when visibility is clearly limited (< 15 km)
+        f_haze = 0.82 if v_km < 15.0 else 1.0
+
+        # Water-surface specular albedo contribution (harbor reflections)
+        g_ground = ghi * albedo_specular * ground_view
+
+        poa_irradiance = (gti + g_ground) * f_haze  # W/m² on plane-of-array
+
+        # Thermal power coefficient based on ambient temperature
+        f_temp = 1.0 + (-0.003 * (t - 25.0))
+
+        hourly_energy_kwh = SYSTEM_KWP * (poa_irradiance / 1000.0) * f_temp
+
+        # Distribute hourly energy into 12 x 5-minute bins
+        slice_kwh = max(0.0, hourly_energy_kwh / 12.0)
+        for _ in range(12):
+            preds.append(slice_kwh)
+            clouds.append(c)
+
     return pd.DataFrame({"Time": times, "Predicted": preds, "Cloud_Cover": clouds})
 
 # --- 2. THE DASHBOARD ---
