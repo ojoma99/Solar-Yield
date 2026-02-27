@@ -31,7 +31,8 @@ def get_varel_prediction(date_str):
     return pd.DataFrame({"Time": times, "Predicted": preds, "Cloud_Cover": clouds})
 
 # --- 2. THE DASHBOARD ---
-st.title("⚓ Solar Truth: Hafenstr. 18")
+# Abamu Residence heading
+st.markdown("# Abamu Residence  \n### Solar Predictor")
 selected_date = st.sidebar.date_input("Analysis Date", datetime.now().date())
 d_str = selected_date.strftime("%Y-%m-%d")
 
@@ -85,14 +86,65 @@ else:
 # --- 4. THE HISTOGRAM ---
 from plotly.subplots import make_subplots
 fig = make_subplots(specs=[[{"secondary_y": True}]])
-fig.add_trace(go.Bar(x=df['Time'], y=df['Predicted'], name='Predicted (Orange)', marker_color='orange', opacity=0.3), secondary_y=False)
+
+fig.add_trace(
+    go.Bar(
+        x=df["Time"],
+        y=df["Predicted"],
+        name="Predicted (Orange)",
+        marker_color="orange",
+        opacity=0.3,
+    ),
+    secondary_y=False,
+)
 
 if actuals:
-    df['Color'] = df.apply(lambda r: '#2ecc71' if r['Actual'] >= r['Predicted'] else '#e74c3c', axis=1)
-    fig.add_trace(go.Bar(x=df['Time'], y=df['Actual'], name='Actual (Yield)', marker_color=df['Color']), secondary_y=False)
+    df["Color"] = df.apply(
+        lambda r: "#2ecc71" if r["Actual"] >= r["Predicted"] else "#e74c3c", axis=1
+    )
+    fig.add_trace(
+        go.Bar(
+            x=df["Time"],
+            y=df["Actual"],
+            name="Actual (Yield)",
+            marker_color=df["Color"],
+        ),
+        secondary_y=False,
+    )
 
 if show_clouds:
-    fig.add_trace(go.Scatter(x=df['Time'], y=df['Cloud_Cover'], name='Cloud %', line=dict(color='#3498db', dash='dot')), secondary_y=True)
+    fig.add_trace(
+        go.Scatter(
+            x=df["Time"],
+            y=df["Cloud_Cover"],
+            name="Cloud %",
+            line=dict(color="#3498db", width=2),
+        ),
+        secondary_y=True,
+    )
 
-fig.update_layout(template="plotly_dark", barmode='overlay', title=f"Hafenstr. 18 Performance: {d_str}")
-st.plotly_chart(fig, use_container_width=True)
+fig.update_layout(
+    margin=dict(l=10, r=10, t=50, b=10),
+    template="plotly_dark",
+    barmode="overlay",
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="right",
+        x=1,
+    ),
+    dragmode="zoom",
+    hovermode="x unified",
+    title=f"Hafenstr. 18 Performance: {d_str}",
+)
+
+st.plotly_chart(
+    fig,
+    use_container_width=True,
+    config={
+        "scrollZoom": True,
+        "displayModeBar": False,
+        "responsive": True,
+    },
+)
