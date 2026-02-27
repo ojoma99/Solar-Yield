@@ -8,7 +8,7 @@ from datetime import datetime
 # --- SYSTEM CONFIG ---
 SYSTEM_KWP = 8.6
 LAT, LON = 53.396, 8.136
-GROWATT_TOKEN = "tb346b22pb1e34nhf057tcq48xkyc7aq"
+GROWATT_TOKEN = "00j5761b6xl70qe24c7xkit7k67bk0ql"
 
 st.set_page_config(page_title="Varel Solar Truth", layout="wide", page_icon="⚓")
 
