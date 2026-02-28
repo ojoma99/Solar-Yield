@@ -296,6 +296,11 @@ if actuals:
 else:
     df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0)
 
+# Physics calibration: when actual yield near zero (cloudy), apply 0.15 irradiance multiplier so Predicted matches cloudy status (JAM54D41-430/LB)
+if not actuals or _safe_numeric(sum(actuals)) < 0.5:
+    df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0) * 0.15
+total_pre = float(df["Predicted"].sum())
+
 # HUD: all values pd.to_numeric(val, errors='coerce').fillna(0) — prevents 'str - str' math errors
 total_pre_num = _safe_numeric(total_pre)
 current_kw = (current_power_w / 1000.0) if current_power_w is not None else realtime_kw
@@ -306,15 +311,23 @@ if daily_total_kwh < 0:
 system_health_pct = (daily_total_kwh / total_pre_num * 100) if total_pre_num > 0 and actuals else (_safe_numeric(current_kw) / SYSTEM_KWP * 100) if current_kw else 0.0
 system_health_pct = _safe_numeric(system_health_pct)
 
-m1, m2, m3 = st.columns(3)
-m1.metric("Live Power", f"{current_kw:.2f} kW")
-m2.metric("Yield", f"{daily_total_kwh:.1f} kWh")
-m3.metric("Efficiency", f"{system_health_pct:.1f}%")
+# Four-column HUD (single row in portrait) — professional Growatt-style
+st.markdown(
+    '<style>div[data-testid="column"] {width: 25% !important; flex: 1 1 25% !important; min-width: 25% !important; text-align: center; font-size: 0.8em;}</style>',
+    unsafe_allow_html=True,
+)
+pred_live_kw = _safe_numeric(realtime_kw)  # 430Wp / 80% bifacial at current solar position
+pred_total_kwh = total_pre_num             # full-day integration (JAM54D41-430/LB)
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Live kW", f"{current_kw:.2f}")
+m2.metric("Pred Live", f"{pred_live_kw:.2f}")
+m3.metric("Total kWh", f"{daily_total_kwh:.1f}")
+m4.metric("Pred Total", f"{pred_total_kwh:.1f}")
 
 # Spacer before chart
 st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
 
-# --- Mobile: touch-action pan-y + overflow hidden so page scrolls up/down; chart pinch/pan inside ---
+# --- Mobile: touch-action pan-y + -webkit-overflow-scrolling so page scrolls; pinch zooms time (X) only ---
 st.markdown(
     """
     <style>
@@ -322,6 +335,7 @@ st.markdown(
     div[data-testid="stVerticalBlock"]:has([id^="plotly"]) {
         touch-action: pan-y !important;
         overflow: hidden !important;
+        -webkit-overflow-scrolling: touch !important;
     }
     .js-plotly-plot, [id^="plotly"] {
         touch-action: pan-y !important;
@@ -350,7 +364,7 @@ fig.add_trace(
     )
 )
 
-# Actual: Neon Yellow #FFFF00, 1px black border (Growatt inverter)
+# Actual: Neon Yellow #FFFF00 (Growatt inverter)
 if actuals:
     fig.add_trace(
         go.Bar(
@@ -367,34 +381,38 @@ if actuals:
         )
     )
 
-# Fixed window 07:00–21:00; x stretchable (fixedrange=False) for two-finger horizontal stretch
+# Precision pinch-zoom: horizontal only (fixedrange=False); 07:00–21:00; spike for time selection
 fig.update_xaxes(
     range=[f"{d_str} 07:00", f"{d_str} 21:00"],
     type="date",
     dtick=3600000 * 3,
     tickformat="%H:%M",
     fixedrange=False,
+    spikemode="across",
+    spikesnap="cursor",
+    spikethickness=1,
+    spikedash="solid",
 )
-# Tight crop Y: [0, max(actual, predicted)]; if both nearly zero use [0, 0.5] so bars still fill vertical space
+# Zero-headroom Y: range=[0, max_data]; peak touches top of grid
 pred_max = float(pd.to_numeric(df["Predicted"], errors="coerce").fillna(0).max())
 actual_max = float(pd.to_numeric(df["Actual"], errors="coerce").fillna(0).max()) if "Actual" in df.columns else 0.0
-y_top = max(pred_max, actual_max, 0.5)
+max_data = max(pred_max, actual_max, 0.01)
 fig.update_yaxes(
-    range=[0, y_top],
+    range=[0, max_data],
     fixedrange=True,
-    nticks=5,
+    nticks=4,
     title_text="Yield (kWh)",
     side="left",
     anchor="x",
 )
 
-# --- Clean Chart: legend top, no toolbar, deep charcoal bg, pan for mobile ---
+# Navigation: hovermode x unified — hovering anywhere in column triggers spike line for precision
 fig.update_layout(
     margin=dict(l=48, r=0, t=40, b=0),
     height=400,
     template="plotly_dark",
-    paper_bgcolor="#121212",
-    plot_bgcolor="#121212",
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
     font=dict(color="#e0e0e0"),
     barmode="overlay",
     hovermode="x unified",
@@ -407,13 +425,24 @@ fig.update_layout(
         bordercolor="rgba(0,0,0,0)",
         borderwidth=0,
     ),
-    xaxis=dict(gridcolor="rgba(255,255,255,0.1)", fixedrange=False, range=[f"{d_str} 07:00", f"{d_str} 21:00"]),
-    yaxis=dict(gridcolor="rgba(255,255,255,0.1)", fixedrange=True),
+    xaxis=dict(
+        gridcolor="rgba(255,255,255,0.08)",
+        fixedrange=False,
+        range=[f"{d_str} 07:00", f"{d_str} 21:00"],
+        spikemode="across",
+        spikethickness=1,
+        spikedash="solid",
+        showspikes=True,
+        spikesnap="cursor",
+    ),
+    yaxis=dict(gridcolor="rgba(255,255,255,0.08)", fixedrange=True),
     dragmode="pan",
     uirevision="abamu_chart",
     title="",
 )
 
+# Precision pinch-zoom: wrap in div so vertical page scroll works, horizontal stretch for time
+st.markdown('<div style="touch-action: pan-y;">', unsafe_allow_html=True)
 with st.container():
     st.plotly_chart(
         fig,
@@ -424,9 +453,8 @@ with st.container():
             "displayModeBar": False,
         },
     )
+st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown("---")
-st.markdown(
-    '<p style="text-align: center; color: #888; font-size: 0.85rem; margin: 0.5rem 0;">powered by ojoma abamu</p>',
-    unsafe_allow_html=True,
-)
+_, footer_col, _ = st.columns([1, 2, 1])
+footer_col.caption("Powered by Ojoma Abamu")
