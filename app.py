@@ -5,7 +5,7 @@ import requests
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
-from datetime import datetime
+from datetime import datetime, timedelta
 import math
 try:
     from zoneinfo import ZoneInfo
@@ -229,6 +229,7 @@ _session.headers.update({
     "token": GROWATT_TOKEN,
 })
 
+api = None
 try:
     api = growattServer.OpenApiV1(token=GROWATT_TOKEN)
     api.session = _session
@@ -319,15 +320,15 @@ st.markdown(
 pred_live_kw = _safe_numeric(realtime_kw)  # 430Wp / 80% bifacial at current solar position
 pred_total_kwh = total_pre_num             # full-day integration (JAM54D41-430/LB)
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Live kW", f"{current_kw:.2f}")
-m2.metric("Pred Live", f"{pred_live_kw:.2f}")
-m3.metric("Total kWh", f"{daily_total_kwh:.1f}")
-m4.metric("Pred Total", f"{pred_total_kwh:.1f}")
+m1.metric("Live (kW)", f"{current_kw:.2f}")
+m2.metric("Pred Live (kW)", f"{pred_live_kw:.2f}")
+m3.metric("Daily (kWh)", f"{daily_total_kwh:.1f}")
+m4.metric("Pred Daily (kWh)", f"{pred_total_kwh:.1f}")
 
-# Spacer before chart
-st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
+# --- Navigation Tabs (Growatt-style time-series) ---
+tab_hour, tab_day, tab_month, tab_year = st.tabs(["Hour", "Day", "Month", "Year"])
 
-# --- Mobile: touch-action pan-y + -webkit-overflow-scrolling so page scrolls; pinch zooms time (X) only ---
+# --- Mobile: touch-action pan-y for vertical scroll; pinch zooms time (X) only on Hour tab ---
 st.markdown(
     """
     <style>
@@ -345,115 +346,193 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- 4. THE HISTOGRAM (Physics baseline: 430Wp / 80% Bifacial — Green bars always active; if Growatt fails, UI shows physics only) ---
-fig = go.Figure()
+# ---------- HOUR TAB: 07:00–21:00 detailed view, horizontal pinch-zoom, hovermode x unified ----------
+with tab_hour:
+    fig = go.Figure()
 
-# Predicted: Electric Green #39FF14, 1.5px black border (always drawn so UI is never empty)
-fig.add_trace(
-    go.Bar(
-        x=df["Time"],
-        y=df["Predicted"],
-        name="Predicted",
-        customdata=df["Cloud_Cover"],
-        hovertemplate="Predicted: %{y:.2f} kWh<br>Cloud: %{customdata:.0f}%%<extra></extra>",
-        marker=dict(
-            color=PREDICTED_COLOR,
-            line=dict(color="black", width=1),
-        ),
-        opacity=0.5,
-    )
-)
-
-# Actual: Neon Yellow #FFFF00 (Growatt inverter)
-if actuals:
+    # Predicted: Electric Green #39FF14 (430Wp / 80% Bifacial)
     fig.add_trace(
         go.Bar(
             x=df["Time"],
-            y=df["Actual"],
-            name="Actual",
+            y=df["Predicted"],
+            name="Predicted",
             customdata=df["Cloud_Cover"],
-            hovertemplate="Actual: %{y:.2f} kWh<br>Cloud: %{customdata:.0f}%%<extra></extra>",
-            marker=dict(
-                color=ACTUAL_COLOR,
-                line=dict(color="black", width=1),
-            ),
-            opacity=0.8,
+            hovertemplate="Predicted: %{y:.2f} kWh<br>Cloud: %{customdata:.0f}%%<extra></extra>",
+            marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)),
+            opacity=0.5,
         )
     )
-
-# Precision pinch-zoom: horizontal only (fixedrange=False); 07:00–21:00; spike for time selection
-fig.update_xaxes(
-    range=[f"{d_str} 07:00", f"{d_str} 21:00"],
-    type="date",
-    dtick=3600000 * 3,
-    tickformat="%H:%M",
-    fixedrange=False,
-    spikemode="across",
-    spikesnap="cursor",
-    spikethickness=1,
-    spikedash="solid",
-)
-# Zero-headroom Y: range=[0, max_data]; peak touches top of grid
-pred_max = float(pd.to_numeric(df["Predicted"], errors="coerce").fillna(0).max())
-actual_max = float(pd.to_numeric(df["Actual"], errors="coerce").fillna(0).max()) if "Actual" in df.columns else 0.0
-max_data = max(pred_max, actual_max, 0.01)
-fig.update_yaxes(
-    range=[0, max_data],
-    fixedrange=True,
-    nticks=4,
-    title_text="Yield (kWh)",
-    side="left",
-    anchor="x",
-)
-
-# Navigation: hovermode x unified — hovering anywhere in column triggers spike line for precision
-fig.update_layout(
-    margin=dict(l=48, r=0, t=40, b=0),
-    height=400,
-    template="plotly_dark",
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(color="#e0e0e0"),
-    barmode="overlay",
-    hovermode="x unified",
-    legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=1.02,
-        x=0.5,
-        xanchor="center",
-        bordercolor="rgba(0,0,0,0)",
-        borderwidth=0,
-    ),
-    xaxis=dict(
-        gridcolor="rgba(255,255,255,0.08)",
-        fixedrange=False,
+    if actuals:
+        fig.add_trace(
+            go.Bar(
+                x=df["Time"],
+                y=df["Actual"],
+                name="Actual",
+                customdata=df["Cloud_Cover"],
+                hovertemplate="Actual: %{y:.2f} kWh<br>Cloud: %{customdata:.0f}%%<extra></extra>",
+                marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)),
+                opacity=0.8,
+            )
+        )
+    fig.update_xaxes(
         range=[f"{d_str} 07:00", f"{d_str} 21:00"],
+        type="date",
+        dtick=3600000 * 3,
+        tickformat="%H:%M",
+        fixedrange=False,
         spikemode="across",
+        spikesnap="cursor",
         spikethickness=1,
         spikedash="solid",
-        showspikes=True,
-        spikesnap="cursor",
-    ),
-    yaxis=dict(gridcolor="rgba(255,255,255,0.08)", fixedrange=True),
-    dragmode="pan",
-    uirevision="abamu_chart",
-    title="",
-)
-
-# Precision pinch-zoom: wrap in div so vertical page scroll works, horizontal stretch for time
-st.markdown('<div style="touch-action: pan-y;">', unsafe_allow_html=True)
-with st.container():
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        key="abamu_solar_chart",
-        config={
-            "scrollZoom": True,
-            "displayModeBar": False,
-        },
     )
-st.markdown("</div>", unsafe_allow_html=True)
+    pred_max = float(pd.to_numeric(df["Predicted"], errors="coerce").fillna(0).max())
+    actual_max = float(pd.to_numeric(df["Actual"], errors="coerce").fillna(0).max()) if "Actual" in df.columns else 0.0
+    max_val = max(pred_max, actual_max, 0.01)
+    fig.update_yaxes(
+        range=[0, max_val],
+        fixedrange=True,
+        nticks=4,
+        title_text="Yield (kWh)",
+        side="left",
+        anchor="x",
+    )
+    fig.update_layout(
+        margin=dict(l=48, r=0, t=40, b=0),
+        height=400,
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#e0e0e0"),
+        barmode="overlay",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.5, xanchor="center", bordercolor="rgba(0,0,0,0)", borderwidth=0),
+        xaxis=dict(
+            gridcolor="rgba(255,255,255,0.08)",
+            fixedrange=False,
+            range=[f"{d_str} 07:00", f"{d_str} 21:00"],
+            spikemode="across",
+            spikethickness=1,
+            spikedash="solid",
+            showspikes=True,
+            spikesnap="cursor",
+        ),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.08)", fixedrange=True),
+        dragmode="pan",
+        uirevision="abamu_hour",
+        title="",
+    )
+    st.markdown('<div style="touch-action: pan-y;">', unsafe_allow_html=True)
+    with st.container():
+        st.plotly_chart(fig, use_container_width=True, key="abamu_solar_chart", config={"scrollZoom": True, "displayModeBar": False})
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ---------- DAY TAB: Last 7 days aggregate (Actual vs Predicted, 430Wp physics) ----------
+with tab_day:
+    from datetime import timedelta
+    day_dates = [selected_date - timedelta(days=i) for i in range(6, -1, -1)]
+    day_actuals = []
+    day_preds = []
+    _pid = (plants[0].get("plant_id") or plants[0].get("id")) if plants else None
+    for d in day_dates:
+        ds = d.strftime("%Y-%m-%d")
+        pdf = get_varel_prediction(ds, cloud_cover)
+        day_preds.append(float(pd.to_numeric(pdf["Predicted"], errors="coerce").fillna(0).sum()))
+        if _pid and api is not None:
+            try:
+                h = api.plant_energy_history(_pid, ds, ds, "day", 1, 300)
+                el = (h or {}).get("energy_data") or (h or {}).get("dayPackage") or []
+                day_actuals.append(float(pd.to_numeric([_extract_energy(x) for x in el], errors="coerce").fillna(0).sum()) if isinstance(el, list) else 0.0)
+            except Exception:
+                day_actuals.append(0.0)
+        else:
+            day_actuals.append(0.0)
+    day_actuals = [float(pd.to_numeric(x, errors="coerce").fillna(0)) for x in day_actuals]
+    day_preds = [float(pd.to_numeric(x, errors="coerce").fillna(0)) for x in day_preds]
+    fig_day = go.Figure()
+    fig_day.add_trace(go.Bar(x=[d.strftime("%a %d") for d in day_dates], y=day_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
+    fig_day.add_trace(go.Bar(x=[d.strftime("%a %d") for d in day_dates], y=day_actuals, name="Actual", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
+    max_day = max(max(day_actuals or [0]), max(day_preds or [0]), 0.01)
+    fig_day.update_yaxes(range=[0, max_day], fixedrange=True, nticks=4, title_text="Yield (kWh)")
+    fig_day.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#e0e0e0"),
+        barmode="overlay",
+        hovermode="x unified",
+        margin=dict(l=48, r=0, t=24, b=48),
+        height=320,
+        xaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.5, xanchor="center"),
+    )
+    st.plotly_chart(fig_day, use_container_width=True, key="abamu_day_chart", config={"displayModeBar": False})
+
+# ---------- MONTH TAB: Last 12 months (current month from daily; rest placeholder) ----------
+with tab_month:
+    now = datetime.now(BERLIN).date() if BERLIN else datetime.now().date()
+    month_labels = []
+    month_actuals = []
+    month_preds = []
+    y, m = now.year, now.month
+    for _ in range(12):
+        month_labels.append(datetime(y, m, 1).strftime("%b %Y"))
+        if y == now.year and m == now.month:
+            month_actuals.append(daily_total_kwh)
+            month_preds.append(pred_total_kwh)
+        else:
+            month_actuals.append(0.0)
+            month_preds.append(0.0)
+        m -= 1
+        if m < 1:
+            m, y = 12, y - 1
+    month_labels.reverse()
+    month_actuals.reverse()
+    month_preds.reverse()
+    fig_month = go.Figure()
+    fig_month.add_trace(go.Bar(x=month_labels, y=month_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
+    fig_month.add_trace(go.Bar(x=month_labels, y=month_actuals, name="Actual", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
+    max_month = max(max(month_actuals or [0]), max(month_preds or [0]), 0.01)
+    fig_month.update_yaxes(range=[0, max_month], fixedrange=True, nticks=4, title_text="Yield (kWh)")
+    fig_month.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#e0e0e0"),
+        barmode="overlay",
+        hovermode="x unified",
+        margin=dict(l=48, r=0, t=24, b=80),
+        height=320,
+        xaxis=dict(gridcolor="rgba(255,255,255,0.08)", tickangle=-45),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.5, xanchor="center"),
+    )
+    st.plotly_chart(fig_month, use_container_width=True, key="abamu_month_chart", config={"displayModeBar": False})
+
+# ---------- YEAR TAB: Last 3 years (current year from daily; rest placeholder) ----------
+with tab_year:
+    year_labels = [str(now.year - 2), str(now.year - 1), str(now.year)]
+    year_actuals = [0.0, 0.0, daily_total_kwh if selected_date.year == now.year else 0.0]
+    year_preds = [0.0, 0.0, pred_total_kwh if selected_date.year == now.year else 0.0]
+    fig_year = go.Figure()
+    fig_year.add_trace(go.Bar(x=year_labels, y=year_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
+    fig_year.add_trace(go.Bar(x=year_labels, y=year_actuals, name="Actual", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
+    max_year = max(max(year_actuals or [0]), max(year_preds or [0]), 0.01)
+    fig_year.update_yaxes(range=[0, max_year], fixedrange=True, nticks=4, title_text="Yield (kWh)")
+    fig_year.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#e0e0e0"),
+        barmode="overlay",
+        hovermode="x unified",
+        margin=dict(l=48, r=0, t=24, b=48),
+        height=320,
+        xaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.5, xanchor="center"),
+    )
+    st.plotly_chart(fig_year, use_container_width=True, key="abamu_year_chart", config={"displayModeBar": False})
 
 st.markdown("---")
 _, footer_col, _ = st.columns([1, 2, 1])
