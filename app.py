@@ -252,15 +252,17 @@ def _extract_energy(val) -> float:
     return _safe_numeric(val)
 
 
-# Growatt: sovereign and persistent session; cookies stored after login; 401/403 triggers re-login and retry
+# Growatt: global data fetch at top — login + plant_list so all tabs (Hour, Day, Month, Year) can use plant_id
 actuals = []
 current_power_w = None
 sync_msg = "Inverter Syncing..."
 last_sync = "N/A"
+plants = []
+pid = None
 _session = requests.Session()
 _login(_session)
-
 api = None
+
 try:
     api = growattServer.OpenApiV1(token=os.environ.get("GROWATT_TOKEN", GROWATT_TOKEN))
     api.session = _session
@@ -339,9 +341,9 @@ if daily_total_kwh < 0:
 system_health_pct = (daily_total_kwh / total_pre_num * 100) if total_pre_num > 0 and actuals else (_safe_numeric(current_kw) / SYSTEM_KWP * 100) if current_kw else 0.0
 system_health_pct = _safe_numeric(system_health_pct)
 
-# High-density metric HUD: single row, 4 columns (25% each on portrait); Growatt-style
+# Single-row metric HUD (portrait fix): force 4 metrics into one row
 st.markdown(
-    '<style>div[data-testid="column"] {width: 25% !important; flex: 1 1 25% !important; min-width: 25% !important; text-align: center; font-size: 0.8em;}</style>',
+    '<style>div[data-testid="column"] {width: 25% !important; flex: 1 1 25% !important; min-width: 25% !important; text-align: center;}</style>',
     unsafe_allow_html=True,
 )
 pred_live_kw = _safe_numeric(realtime_kw)  # 430Wp / 80% bifacial at current solar position
@@ -455,18 +457,16 @@ with tab_hour:
 
 # ---------- DAY TAB: Last 7 days aggregate (Actual vs Predicted, 430Wp physics) ----------
 with tab_day:
-    from datetime import timedelta
     day_dates = [selected_date - timedelta(days=i) for i in range(6, -1, -1)]
     day_actuals = []
     day_preds = []
-    _pid = (plants[0].get("plant_id") or plants[0].get("id")) if plants else None
     for d in day_dates:
         ds = d.strftime("%Y-%m-%d")
         pdf = get_varel_prediction(ds, cloud_cover)
         day_preds.append(float(pd.to_numeric(pdf["Predicted"], errors="coerce").fillna(0).sum()))
         if _pid and api is not None:
             try:
-                h = api.plant_energy_history(_pid, ds, ds, "day", 1, 300)
+                h = api.plant_energy_history(pid, ds, ds, "day", 1, 300)
                 el = (h or {}).get("energy_data") or (h or {}).get("dayPackage") or []
                 day_actuals.append(float(pd.to_numeric([_extract_energy(x) for x in el], errors="coerce").fillna(0).sum()) if isinstance(el, list) else 0.0)
             except Exception:
