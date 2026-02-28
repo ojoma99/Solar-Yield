@@ -76,53 +76,77 @@ def _solar_elevation_azimuth(dt: datetime) -> tuple[float, float]:
     return elev_deg, azim_deg
 
 
-def _poa_kw_from_geometry(elev_deg: float, azim_deg: float) -> tuple[float, float]:
-    """Returns (total_kw, rear_kw). Front 430W, Rear 464W (bifacial 0.80), albedo 0.38, 60° SW."""
+def _low_irradiance_factor(poa_wm2: float) -> float:
+    """JAM54D41-430/LB 'Better low irradiance response': relative gain at low G so prediction matches cloudy/dawn data."""
+    if poa_wm2 <= 0:
+        return 1.0
+    G_std = 1000.0
+    if poa_wm2 >= G_std:
+        return 1.0
+    # Datasheet-style: at low G, module delivers slightly more than linear (e.g. ~1.05–1.08 at 200 W/m²)
+    return 1.0 + 0.08 * (1.0 - poa_wm2 / G_std)
+
+
+def _poa_kw_from_geometry(elev_deg: float, azim_deg: float, cloud_cover: float = 0.0) -> tuple[float, float]:
+    """
+    Returns (total_kw, rear_kw). Front 430W, Rear 464W (bifacial 0.80), albedo 0.38, 60° SW.
+    When cloud_cover is high (0–1), prioritize diffuse radiation; apply low-irradiance response curve.
+    """
     if elev_deg <= 0:
         return 0.0, 0.0
     tilt_rad = math.radians(TILT_DEG)
     ground_view = (1.0 - math.cos(tilt_rad)) / 2.0
     am = 1.0 / max(0.01, math.sin(math.radians(elev_deg)))
-    ghi = 1361.0 * (0.7 ** min(am, 5.0)) * math.sin(math.radians(elev_deg))
+    ghi_clear = 1361.0 * (0.7 ** min(am, 5.0)) * math.sin(math.radians(elev_deg))
+    sin_elev = max(0.01, math.sin(math.radians(elev_deg)))
+    dni_clear = ghi_clear / sin_elev if sin_elev > 0.01 else 0.0
+    # Cloud: reduce beam, prioritize diffuse (high cloud → more diffuse fraction)
+    cloud = max(0.0, min(1.0, cloud_cover))
+    clearness = 1.0 - cloud
+    ghi = ghi_clear * (0.25 + 0.75 * clearness)
+    dni = dni_clear * clearness
+    diffuse_ghi = max(0.0, ghi - dni * sin_elev)
     inc_rad = math.acos(
         math.cos(math.radians(elev_deg)) * math.cos(tilt_rad)
         + math.sin(math.radians(elev_deg)) * math.sin(tilt_rad) * math.cos(math.radians(azim_deg - AZIMUTH_PANEL))
     )
     cos_inc = max(0.0, math.cos(inc_rad))
-    sin_elev = max(0.01, math.sin(math.radians(elev_deg)))
-    dni = ghi / sin_elev if sin_elev > 0.01 else 0.0
     poa_front_beam = dni * cos_inc
-    poa_front_diffuse = 0.20 * ghi * (1.0 + math.cos(tilt_rad)) / 2.0
+    # Diffuse on tilt (isotropic); when cloudy, diffuse_ghi dominates so we prioritize diffuse
+    poa_front_diffuse = diffuse_ghi * (1.0 + math.cos(tilt_rad)) / 2.0 if ghi > 0 else 0.0
     poa_front_ground = ALBEDO_SPECULAR * ghi * ground_view
     poa_front = poa_front_beam + poa_front_diffuse + poa_front_ground
     poa_rear = ALBEDO_SPECULAR * ghi * ground_view
+    # JAM54D41-430/LB better low irradiance response: scale effective POA (W/m²)
+    poa_front *= _low_irradiance_factor(poa_front)
+    poa_rear *= _low_irradiance_factor(poa_rear)
     kw_front = (poa_front / 1000.0) * (N_MODULES * PMAX_W) / 1000.0
     kw_rear = (poa_rear / 1000.0) * (N_MODULES * REAR_PMAX_W) / 1000.0 * BIFACIALITY
     return kw_front + kw_rear, kw_rear
 
 
-def real_time_expected_kw() -> float:
-    """Expected kW at current minute: solar geometry (Varel 53.396, 8.136), 430W/464W bifacial, albedo 0.38."""
+def real_time_expected_kw(cloud_cover: float = 0.0) -> float:
+    """Expected kW at current minute: solar geometry, 430W/464W bifacial, albedo 0.38; optional cloud for diffuse priority."""
     now = datetime.now(BERLIN) if BERLIN else datetime.now()
     now_naive = now.replace(tzinfo=None) if now.tzinfo else now
     elev, azim = _solar_elevation_azimuth(now_naive)
-    total, _ = _poa_kw_from_geometry(elev, azim)
+    total, _ = _poa_kw_from_geometry(elev, azim, cloud_cover)
     return max(0.0, total)
 
 
-def real_time_bifacial_gain_pct() -> float:
+def real_time_bifacial_gain_pct(cloud_cover: float = 0.0) -> float:
     """Rear contribution as % of total (JAM54D41-430/LB, 80% bifacial)."""
     now = datetime.now(BERLIN) if BERLIN else datetime.now()
     now_naive = now.replace(tzinfo=None) if now.tzinfo else now
     elev, azim = _solar_elevation_azimuth(now_naive)
-    total, rear = _poa_kw_from_geometry(elev, azim)
+    total, rear = _poa_kw_from_geometry(elev, azim, cloud_cover)
     return (rear / total * 100) if total > 0 else 0.0
 
 
-def get_varel_prediction(date_str: str) -> pd.DataFrame:
+def get_varel_prediction(date_str: str, cloud_cover: float = 0.0) -> pd.DataFrame:
     """
-    Physics-only real-time prediction (no external weather API).
-    Zenith/azimuth for Varel (53.396, 8.136); JAM54D41-430/LB: 430W front, 464W rear, bifacial 0.80, albedo 0.38.
+    Physics-only prediction. Varel 53.396, 8.136; JAM54D41-430/LB, 430W/464W bifacial 0.80, albedo 0.38.
+    When cloud_cover > 0, prioritizes diffuse radiation and applies better low-irradiance response.
     """
     times = pd.date_range(
         start=f"{date_str} 00:00",
@@ -130,14 +154,14 @@ def get_varel_prediction(date_str: str) -> pd.DataFrame:
         freq="5min",
     )
     preds: list[float] = []
-    clouds: list[float] = []  # placeholder for legend; no API
+    clouds: list[float] = []
     for t in times:
         dt = t.to_pydatetime()
         elev, azim = _solar_elevation_azimuth(dt)
-        total_kw, _ = _poa_kw_from_geometry(elev, azim)
+        total_kw, _ = _poa_kw_from_geometry(elev, azim, cloud_cover)
         kwh_5min = max(0.0, total_kw * (5.0 / 60.0))
         preds.append(kwh_5min)
-        clouds.append(0.0)
+        clouds.append(cloud_cover * 100.0)
     return pd.DataFrame({"Time": times, "Predicted": preds, "Cloud_Cover": clouds})
 
 # --- 2. THE DASHBOARD (Professional Mobile Command Center) ---
@@ -162,13 +186,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 selected_date = st.sidebar.date_input("Analysis Date", datetime.now().date())
+cloud_cover_pct = st.sidebar.slider("Cloud cover (%)", 0, 100, 0, help="Prioritize diffuse radiation when high; improves cloudy/low-irradiance match.")
+cloud_cover = float(cloud_cover_pct) / 100.0
 d_str = selected_date.strftime("%Y-%m-%d")
 
-df = get_varel_prediction(d_str)
+df = get_varel_prediction(d_str, cloud_cover)
 # Coerce prediction to numeric so all math is float (no str - str)
 df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0)
 total_pre = float(df["Predicted"].sum())
-realtime_kw = real_time_expected_kw()
+realtime_kw = real_time_expected_kw(cloud_cover)
 
 def _safe_numeric(val) -> float:
     """Single value: pd.to_numeric(val, errors='coerce').fillna(0) as float."""
@@ -270,7 +296,7 @@ if actuals:
 else:
     df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0)
 
-# HUD: all values from pd.to_numeric(..., errors='coerce').fillna(0) so math is safe
+# HUD: all values pd.to_numeric(val, errors='coerce').fillna(0) — prevents 'str - str' math errors
 total_pre_num = _safe_numeric(total_pre)
 current_kw = (current_power_w / 1000.0) if current_power_w is not None else realtime_kw
 current_kw = _safe_numeric(current_kw)
@@ -349,10 +375,10 @@ fig.update_xaxes(
     tickformat="%H:%M",
     fixedrange=False,
 )
-# Tight crop Y: [0, max(actual, predicted)], no headroom — peak bar touches top; fixedrange=True so chart doesn't bounce on touch
+# Tight crop Y: [0, max(actual, predicted)]; if both nearly zero use [0, 0.5] so bars still fill vertical space
 pred_max = float(pd.to_numeric(df["Predicted"], errors="coerce").fillna(0).max())
 actual_max = float(pd.to_numeric(df["Actual"], errors="coerce").fillna(0).max()) if "Actual" in df.columns else 0.0
-y_top = max(pred_max, actual_max, 0.1)
+y_top = max(pred_max, actual_max, 0.5)
 fig.update_yaxes(
     range=[0, y_top],
     fixedrange=True,
