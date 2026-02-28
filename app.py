@@ -150,19 +150,23 @@ total_pre = df['Predicted'].sum()
 realtime_kw = real_time_expected_kw()
 
 def _extract_energy(val) -> float:
-    """Extract kWh from Growatt entry: energy, day_total, dayTotal, dayPachage, dayPackage, total_yield."""
+    """Extract kWh from Growatt entry: energy, day_total, dayTotal, dayPachage, dayPackage, total_yield. Coerced to numeric."""
     if val is None:
         return 0.0
     if isinstance(val, (int, float)):
-        return float(val)
-    for key in ("energy", "day_total", "dayTotal", "dayPachage", "dayPackage", "total_yield"):
-        v = val.get(key) if isinstance(val, dict) else None
-        if v is not None:
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                pass
-    return 0.0
+        out = pd.to_numeric(val, errors="coerce")
+        return float(out) if pd.notna(out) else 0.0
+    if isinstance(val, dict):
+        for key in ("energy", "day_total", "dayTotal", "dayPachage", "dayPackage", "total_yield"):
+            v = val.get(key)
+            if v is not None:
+                out = pd.to_numeric(v, errors="coerce")
+                if pd.notna(out):
+                    return float(out)
+        return 0.0
+    # Raw value (e.g. string or number from list)
+    out = pd.to_numeric(val, errors="coerce")
+    return float(out) if pd.notna(out) else 0.0
 
 
 # Growatt: session with browser User-Agent; no-cache for fresh auth; retry on None
@@ -215,7 +219,9 @@ try:
                     if powers:
                         valid = [p for p in powers if p.get("power") is not None]
                         if valid:
-                            current_power_w = float(valid[-1].get("power", 0))
+                            p = valid[-1].get("power")
+                            p_num = pd.to_numeric(p, errors="coerce")
+                            current_power_w = float(p_num) if pd.notna(p_num) and p_num >= 0 else None
                 except Exception:
                     pass
 except growattServer.GrowattV1ApiError as e:
@@ -237,16 +243,20 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-# Align df with actuals for chart
+# Align df with actuals for chart; coerce all yield/power to numeric before math
 if actuals:
     df = df.iloc[:len(actuals)]
-    df["Actual"] = actuals
+    df["Actual"] = pd.Series(pd.to_numeric(actuals, errors="coerce")).fillna(0)
+    df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0)
     df["Diff"] = df["Actual"] - df["Predicted"]
 
-# Abamu HUD: 3 metric tiles — Live kW, Today's Total kWh, System Efficiency
-current_kw = (current_power_w / 1000.0) if current_power_w is not None else realtime_kw
-daily_total_kwh = sum(actuals) if actuals else total_pre
-system_efficiency_pct = (daily_total_kwh / total_pre * 100) if actuals and total_pre else (current_kw / SYSTEM_KWP * 100) if current_kw else 0.0
+# Abamu HUD: 3 metric tiles — Live kW, Today's Total kWh, System Efficiency (all numeric)
+total_pre_num = float(pd.to_numeric(total_pre, errors="coerce")) if pd.notna(pd.to_numeric(total_pre, errors="coerce")) else 0.0
+current_kw = (float(pd.to_numeric(current_power_w, errors="coerce")) / 1000.0) if current_power_w is not None else realtime_kw
+daily_total_kwh = float(pd.to_numeric(sum(actuals), errors="coerce")) if actuals else total_pre_num
+if pd.isna(daily_total_kwh) or daily_total_kwh < 0:
+    daily_total_kwh = total_pre_num
+system_efficiency_pct = (daily_total_kwh / total_pre_num * 100) if actuals and total_pre_num > 0 else (current_kw / SYSTEM_KWP * 100) if current_kw else 0.0
 
 m1, m2, m3 = st.columns(3)
 m1.metric("Live kW", f"{current_kw:.2f}")
@@ -256,17 +266,16 @@ m3.metric("Efficiency", f"{system_efficiency_pct:.1f}%" if system_efficiency_pct
 # Spacer before chart
 st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
 
-# --- Phone fix: touch-action none for pinch/zoom without moving page ---
+# --- Phone fix: pan-y so page scrolls vertically; chart keeps internal zoom ---
 st.markdown(
     """
     <style>
     div[data-testid="stVerticalBlock"]:has(.js-plotly-plot),
     div[data-testid="stVerticalBlock"]:has([id^="plotly"]) {
-        touch-action: none !important;
-        overflow: hidden !important;
+        touch-action: pan-y !important;
     }
     .js-plotly-plot, [id^="plotly"] {
-        touch-action: none !important;
+        touch-action: pan-y !important;
     }
     </style>
     """,
