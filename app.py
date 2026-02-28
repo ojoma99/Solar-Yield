@@ -22,6 +22,42 @@ LAT_RAD = math.radians(LAT)
 GROWATT_TOKEN = os.environ.get("GROWATT_TOKEN", "8d5u01rym66qw9rcf8k34414v71n3wju")
 GROWATT_SERVER = "https://openapi.growatt.com/"  # EU server (no /v1/ — library appends v1/)
 
+# Persistent browser session: realistic User-Agent; cookies stored in session after login
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+def _login(session: requests.Session) -> None:
+    """Apply token and headers to session. Re-read token from env so refreshed credentials are used. Cookies from any prior response are kept in session."""
+    token = os.environ.get("GROWATT_TOKEN", GROWATT_TOKEN)
+    session.headers.update({
+        "User-Agent": USER_AGENT,
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "token": token,
+    })
+
+def _is_auth_error(exc: BaseException) -> bool:
+    """True if exception indicates 401 Unauthorized or 403 Forbidden."""
+    code = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    if code in (401, 403):
+        return True
+    msg = str(exc).lower()
+    return "401" in str(exc) or "403" in str(exc) or "unauthorized" in msg or "forbidden" in msg
+
+def _check_session_and_retry(api, session: requests.Session, fetch_fn):
+    """Run fetch_fn(); if it fails with 401/403, re-run _login(), update api.session, and retry fetch_fn once. Returns (result, error)."""
+    try:
+        return fetch_fn(), None
+    except Exception as e:
+        if not _is_auth_error(e):
+            return None, e
+        _login(session)
+        api.session = session
+        api.server_url = GROWATT_SERVER
+        try:
+            return fetch_fn(), None
+        except Exception as e2:
+            return None, e2
+
 # --- JAM54D41-430/LB Bifacial (hardcoded specs) ---
 PMAX_W = 430                    # Front Pmax
 REAR_PMAX_W = 464               # Rear Pmax / Bifacial Max (10% irradiation ratio)
@@ -216,34 +252,25 @@ def _extract_energy(val) -> float:
     return _safe_numeric(val)
 
 
-# Growatt: session with browser User-Agent; no-cache for fresh auth; retry on None
+# Growatt: sovereign and persistent session; cookies stored after login; 401/403 triggers re-login and retry
 actuals = []
 current_power_w = None
 sync_msg = "Inverter Syncing..."
 last_sync = "N/A"
 _session = requests.Session()
-_session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Cache-Control": "no-cache, no-store, must-revalidate",
-    "Pragma": "no-cache",
-    "token": GROWATT_TOKEN,
-})
+_login(_session)
 
 api = None
 try:
-    api = growattServer.OpenApiV1(token=GROWATT_TOKEN)
+    api = growattServer.OpenApiV1(token=os.environ.get("GROWATT_TOKEN", GROWATT_TOKEN))
     api.session = _session
     api.server_url = GROWATT_SERVER
-    plants_res = api.plant_list()
+    plants_res, auth_err = _check_session_and_retry(api, _session, lambda: api.plant_list())
+    if auth_err:
+        raise auth_err
     if plants_res is None:
-        fresh = requests.Session()
-        fresh.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "token": GROWATT_TOKEN,
-        })
-        api.session = fresh
+        _login(_session)
+        api.session = _session
         plants_res = api.plant_list()
     plants = (plants_res or {}).get("plants") or []
     if plants:
@@ -297,7 +324,7 @@ if actuals:
 else:
     df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0)
 
-# Physics calibration: when actual yield near zero (cloudy), apply 0.15 irradiance multiplier so Predicted matches cloudy status (JAM54D41-430/LB)
+# Physics calibration: JAM54D41-430/LB (430Wp, 80% Bifacial) is the fallback when cloud/inverter data is delayed; show green Predicted bars. When cloudy, apply 0.15 irradiance multiplier.
 if not actuals or _safe_numeric(sum(actuals)) < 0.5:
     df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0) * 0.15
 total_pre = float(df["Predicted"].sum())
@@ -312,7 +339,7 @@ if daily_total_kwh < 0:
 system_health_pct = (daily_total_kwh / total_pre_num * 100) if total_pre_num > 0 and actuals else (_safe_numeric(current_kw) / SYSTEM_KWP * 100) if current_kw else 0.0
 system_health_pct = _safe_numeric(system_health_pct)
 
-# Four-column HUD (single row in portrait) — professional Growatt-style
+# High-density metric HUD: single row, 4 columns (25% each on portrait); Growatt-style
 st.markdown(
     '<style>div[data-testid="column"] {width: 25% !important; flex: 1 1 25% !important; min-width: 25% !important; text-align: center; font-size: 0.8em;}</style>',
     unsafe_allow_html=True,
@@ -320,10 +347,10 @@ st.markdown(
 pred_live_kw = _safe_numeric(realtime_kw)  # 430Wp / 80% bifacial at current solar position
 pred_total_kwh = total_pre_num             # full-day integration (JAM54D41-430/LB)
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Live (kW)", f"{current_kw:.2f}")
-m2.metric("Pred Live (kW)", f"{pred_live_kw:.2f}")
-m3.metric("Daily (kWh)", f"{daily_total_kwh:.1f}")
-m4.metric("Pred Daily (kWh)", f"{pred_total_kwh:.1f}")
+m1.metric("Live kW", f"{current_kw:.2f}")
+m2.metric("Pred Live", f"{pred_live_kw:.2f}")
+m3.metric("Daily kWh", f"{daily_total_kwh:.1f}")
+m4.metric("Pred Daily", f"{pred_total_kwh:.1f}")
 
 # --- Navigation Tabs (Growatt-style time-series) ---
 tab_hour, tab_day, tab_month, tab_year = st.tabs(["Hour", "Day", "Month", "Year"])
