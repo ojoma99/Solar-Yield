@@ -140,33 +140,54 @@ def get_varel_prediction(date_str: str) -> pd.DataFrame:
         clouds.append(0.0)
     return pd.DataFrame({"Time": times, "Predicted": preds, "Cloud_Cover": clouds})
 
-# --- 2. THE DASHBOARD ---
-st.markdown("<h1 style='text-align: center;'>Abamu Residence</h1>", unsafe_allow_html=True)
+# --- 2. THE DASHBOARD (Professional Mobile Command Center) ---
+# Dark theme: centered header ABAMU RESIDENCE in silver
+st.markdown(
+    """
+    <style>
+    header[data-testid="stHeader"] { background: #121212; }
+    .abamu-header {
+        text-align: center;
+        color: #C0C0C0;
+        font-weight: 700;
+        letter-spacing: 0.15em;
+        font-size: 1.4rem;
+        margin: 0.5rem 0;
+        background: #121212;
+        padding: 0.5rem 0;
+    }
+    </style>
+    <p class="abamu-header">ABAMU RESIDENCE</p>
+    """,
+    unsafe_allow_html=True,
+)
 selected_date = st.sidebar.date_input("Analysis Date", datetime.now().date())
 d_str = selected_date.strftime("%Y-%m-%d")
 
 df = get_varel_prediction(d_str)
-total_pre = df['Predicted'].sum()
+# Coerce prediction to numeric so all math is float (no str - str)
+df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0)
+total_pre = float(df["Predicted"].sum())
 realtime_kw = real_time_expected_kw()
 
-def _extract_energy(val) -> float:
-    """Extract kWh from Growatt entry: energy, day_total, dayTotal, dayPachage, dayPackage, total_yield. Coerced to numeric."""
+def _safe_numeric(val) -> float:
+    """Single value: pd.to_numeric(val, errors='coerce').fillna(0) as float."""
     if val is None:
         return 0.0
-    if isinstance(val, (int, float)):
-        out = pd.to_numeric(val, errors="coerce")
-        return float(out) if pd.notna(out) else 0.0
+    s = pd.Series([val])
+    return float(pd.to_numeric(s, errors="coerce").fillna(0).iloc[0])
+
+def _extract_energy(val) -> float:
+    """Extract kWh from Growatt entry; all inputs wrapped in pd.to_numeric(..., errors='coerce').fillna(0)."""
+    if val is None:
+        return 0.0
     if isinstance(val, dict):
         for key in ("energy", "day_total", "dayTotal", "dayPachage", "dayPackage", "total_yield"):
             v = val.get(key)
             if v is not None:
-                out = pd.to_numeric(v, errors="coerce")
-                if pd.notna(out):
-                    return float(out)
+                return _safe_numeric(v)
         return 0.0
-    # Raw value (e.g. string or number from list)
-    out = pd.to_numeric(val, errors="coerce")
-    return float(out) if pd.notna(out) else 0.0
+    return _safe_numeric(val)
 
 
 # Growatt: session with browser User-Agent; no-cache for fresh auth; retry on None
@@ -207,7 +228,8 @@ try:
                 hist = api.plant_energy_history(pid, d_str, d_str, "day", 1, 300)  # retry
             energy_list = (hist or {}).get("energy_data") or (hist or {}).get("dayPackage") or []
             if isinstance(energy_list, list):
-                actuals = [_extract_energy(x) for x in energy_list]
+                raw = [_extract_energy(x) for x in energy_list]
+                actuals = list(pd.to_numeric(raw, errors="coerce").fillna(0))
             if actuals:
                 sync_msg = "🟢 Online"
                 last_sync = datetime.now().strftime("%H:%M:%S")
@@ -220,8 +242,9 @@ try:
                         valid = [p for p in powers if p.get("power") is not None]
                         if valid:
                             p = valid[-1].get("power")
-                            p_num = pd.to_numeric(p, errors="coerce")
-                            current_power_w = float(p_num) if pd.notna(p_num) and p_num >= 0 else None
+                            current_power_w = _safe_numeric(p) if p is not None else None
+                            if current_power_w is not None and current_power_w < 0:
+                                current_power_w = None
                 except Exception:
                     pass
 except growattServer.GrowattV1ApiError as e:
@@ -237,42 +260,42 @@ with st.sidebar:
     st.write(f"Growatt Status: {sync_msg}")
     st.write(f"Last Sync: {last_sync}")
     show_clouds = st.toggle("Enable Cloud Overlay", value=True)
-    st.markdown("---")
-    st.markdown(
-        '<div style="background:#2a2a2a;border-radius:6px;padding:8px 12px;text-align:center;color:#888;font-size:0.8rem;">powered by ojoma abamu</div>',
-        unsafe_allow_html=True,
-    )
 
-# Align df with actuals for chart; coerce all yield/power to numeric before math
+# Align df with actuals; all yield/power numeric before any subtraction (fix str - str)
 if actuals:
-    df = df.iloc[:len(actuals)]
+    df = df.iloc[:len(actuals)].copy()
     df["Actual"] = pd.Series(pd.to_numeric(actuals, errors="coerce")).fillna(0)
     df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0)
-    df["Diff"] = df["Actual"] - df["Predicted"]
+    df["Diff"] = df["Actual"].astype(float) - df["Predicted"].astype(float)
+else:
+    df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0)
 
-# Abamu HUD: 3 metric tiles — Live kW, Today's Total kWh, System Efficiency (all numeric)
-total_pre_num = float(pd.to_numeric(total_pre, errors="coerce")) if pd.notna(pd.to_numeric(total_pre, errors="coerce")) else 0.0
-current_kw = (float(pd.to_numeric(current_power_w, errors="coerce")) / 1000.0) if current_power_w is not None else realtime_kw
-daily_total_kwh = float(pd.to_numeric(sum(actuals), errors="coerce")) if actuals else total_pre_num
-if pd.isna(daily_total_kwh) or daily_total_kwh < 0:
+# HUD: all values from pd.to_numeric(..., errors='coerce').fillna(0) so math is safe
+total_pre_num = _safe_numeric(total_pre)
+current_kw = (current_power_w / 1000.0) if current_power_w is not None else realtime_kw
+current_kw = _safe_numeric(current_kw)
+daily_total_kwh = _safe_numeric(sum(actuals)) if actuals else total_pre_num
+if daily_total_kwh < 0:
     daily_total_kwh = total_pre_num
-system_efficiency_pct = (daily_total_kwh / total_pre_num * 100) if actuals and total_pre_num > 0 else (current_kw / SYSTEM_KWP * 100) if current_kw else 0.0
+system_health_pct = (daily_total_kwh / total_pre_num * 100) if total_pre_num > 0 and actuals else (_safe_numeric(current_kw) / SYSTEM_KWP * 100) if current_kw else 0.0
+system_health_pct = _safe_numeric(system_health_pct)
 
 m1, m2, m3 = st.columns(3)
-m1.metric("Live kW", f"{current_kw:.2f}")
-m2.metric("Daily kWh", f"{daily_total_kwh:.1f}")
-m3.metric("Efficiency", f"{system_efficiency_pct:.1f}%" if system_efficiency_pct else "—")
+m1.metric("Live Power", f"{current_kw:.2f} kW")
+m2.metric("Yield", f"{daily_total_kwh:.1f} kWh")
+m3.metric("Efficiency", f"{system_health_pct:.1f}%")
 
 # Spacer before chart
 st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
 
-# --- Phone fix: pan-y so page scrolls vertically; chart keeps internal zoom ---
+# --- Mobile: touch-action pan-y + overflow hidden so page scrolls up/down; chart pinch/pan inside ---
 st.markdown(
     """
     <style>
     div[data-testid="stVerticalBlock"]:has(.js-plotly-plot),
     div[data-testid="stVerticalBlock"]:has([id^="plotly"]) {
         touch-action: pan-y !important;
+        overflow: hidden !important;
     }
     .js-plotly-plot, [id^="plotly"] {
         touch-action: pan-y !important;
@@ -282,10 +305,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- 4. THE HISTOGRAM ---
+# --- 4. THE HISTOGRAM (Physics baseline: 430Wp / 80% Bifacial — Green bars always active; if Growatt fails, UI shows physics only) ---
 fig = go.Figure()
 
-# Predicted: Electric Green (430Wp / 80% Bifacial physics)
+# Predicted: Electric Green #39FF14, 1.5px black border (always drawn so UI is never empty)
 fig.add_trace(
     go.Bar(
         x=df["Time"],
@@ -295,13 +318,13 @@ fig.add_trace(
         hovertemplate="Predicted: %{y:.2f} kWh<br>Cloud: %{customdata:.0f}%%<extra></extra>",
         marker=dict(
             color=PREDICTED_COLOR,
-            line=dict(color="black", width=1.5),
+            line=dict(color="black", width=1),
         ),
         opacity=0.5,
     )
 )
 
-# Actual: Neon Yellow (Growatt yield)
+# Actual: Neon Yellow #FFFF00, 1px black border (Growatt inverter)
 if actuals:
     fig.add_trace(
         go.Bar(
@@ -312,13 +335,13 @@ if actuals:
             hovertemplate="Actual: %{y:.2f} kWh<br>Cloud: %{customdata:.0f}%%<extra></extra>",
             marker=dict(
                 color=ACTUAL_COLOR,
-                line=dict(color="black", width=1.5),
+                line=dict(color="black", width=1),
             ),
             opacity=0.8,
         )
     )
 
-# --- Focus Window: 07:00–21:00 ---
+# Fixed window 07:00–21:00; x stretchable (fixedrange=False) for two-finger horizontal stretch
 fig.update_xaxes(
     range=[f"{d_str} 07:00", f"{d_str} 21:00"],
     type="date",
@@ -326,12 +349,14 @@ fig.update_xaxes(
     tickformat="%H:%M",
     fixedrange=False,
 )
-
-# Y-axis: autorange for 430Wp / 20.1 kWh peak detail; no hardcoded ceiling
+# Tight crop Y: [0, max(actual, predicted)], no headroom — peak bar touches top; fixedrange=True so chart doesn't bounce on touch
+pred_max = float(pd.to_numeric(df["Predicted"], errors="coerce").fillna(0).max())
+actual_max = float(pd.to_numeric(df["Actual"], errors="coerce").fillna(0).max()) if "Actual" in df.columns else 0.0
+y_top = max(pred_max, actual_max, 0.1)
 fig.update_yaxes(
-    autorange=True,
-    fixedrange=False,
-    nticks=10,
+    range=[0, y_top],
+    fixedrange=True,
+    nticks=5,
     title_text="Yield (kWh)",
     side="left",
     anchor="x",
@@ -356,8 +381,8 @@ fig.update_layout(
         bordercolor="rgba(0,0,0,0)",
         borderwidth=0,
     ),
-    xaxis=dict(gridcolor="rgba(255,255,255,0.1)"),
-    yaxis=dict(gridcolor="rgba(255,255,255,0.1)"),
+    xaxis=dict(gridcolor="rgba(255,255,255,0.1)", fixedrange=False, range=[f"{d_str} 07:00", f"{d_str} 21:00"]),
+    yaxis=dict(gridcolor="rgba(255,255,255,0.1)", fixedrange=True),
     dragmode="pan",
     uirevision="abamu_chart",
     title="",
@@ -371,9 +396,11 @@ with st.container():
         config={
             "scrollZoom": True,
             "displayModeBar": False,
-            "responsive": True,
         },
     )
 
 st.markdown("---")
-st.markdown('<p style="text-align: center; color: #888; font-size: 0.85rem;">powered by ojoma abamu</p>', unsafe_allow_html=True)
+st.markdown(
+    '<p style="text-align: center; color: #888; font-size: 0.85rem; margin: 0.5rem 0;">powered by ojoma abamu</p>',
+    unsafe_allow_html=True,
+)
