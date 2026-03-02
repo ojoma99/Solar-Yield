@@ -1,4 +1,5 @@
 import os
+import time
 import streamlit as st
 import growattServer
 import requests
@@ -24,10 +25,36 @@ GROWATT_GLOBAL_SERVER = "https://server.growatt.com/"
 # Browser emulation: identify as standard browser to avoid 'Invalid Credentials' / server rejection
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+
+def _retry_growatt_call(fn, *args, **kwargs):
+    """
+    Call a Growatt API function with retry: 3 attempts, 2s delay.
+    Returns (result, None) on success, (None, error) on final failure.
+    On persistent 502/RequestException, sets st.session_state['growatt_502'] = True.
+    """
+    last_err = None
+    for attempt in range(3):
+        try:
+            result = fn(*args, **kwargs)
+            if hasattr(result, "status_code") and result.status_code == 502:
+                raise requests.exceptions.HTTPError("502 Bad Gateway", response=result)
+            return result, None
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            is_502 = getattr(getattr(e, "response", None), "status_code", None) == 502
+            if attempt == 2:
+                st.session_state["growatt_502"] = True
+                return None, e
+            time.sleep(2)
+        except Exception as e:
+            return None, e
+    return None, last_err
+
+
 def _create_growatt_api():
-    """Create GrowattApi with persistent session (cookies preserved across calls)."""
+    """Create GrowattApi with persistent session; explicit host https://server.growatt.com."""
     api = growattServer.GrowattApi()
-    api.server_url = GROWATT_GLOBAL_SERVER
+    api.server_url = GROWATT_GLOBAL_SERVER.rstrip("/") + "/"
     api.session.headers.update({"User-Agent": USER_AGENT})
     return api
 
@@ -66,13 +93,13 @@ def _extract_inverter_5min_data(api, inverter_sn: str, date_str: str) -> list:
             return []
         d = date_type(int(parts[0]), int(parts[1]), int(parts[2]))
         dt = datetime.combine(d, datetime.min.time())
-        resp = api.inverter_data(inverter_sn, dt)
+        resp, _ = _retry_growatt_call(api.inverter_data, inverter_sn, dt)
         chart = (resp or {}).get("chartData") or (resp or {}).get("back", {}).get("chartData") or {}
         actuals = _parse_chart(chart)
         if actuals:
             return actuals
         if hasattr(api, "tlx_data"):
-            tlx_resp = api.tlx_data(inverter_sn, dt)
+            tlx_resp, _ = _retry_growatt_call(api.tlx_data, inverter_sn, dt)
             chart = (tlx_resp or {}).get("chartData") or (tlx_resp or {}).get("back", {}).get("chartData") or {}
             return _parse_chart(chart)
     except Exception:
@@ -91,7 +118,7 @@ def _get_plant_history_total(api, plant_id: str, date_str: str, timespan) -> flo
             dt = datetime(y, m, d)
         else:
             return 0.0
-        back = api.plant_detail(plant_id, timespan, dt)
+        back, _ = _retry_growatt_call(api.plant_detail, plant_id, timespan, dt)
         total = (back or {}).get("totalData") or {}
         if isinstance(total, dict):
             for key in ("energy", "dayTotal", "day_total", "eTotal", "monthTotal", "month_total"):
@@ -132,20 +159,20 @@ def _extract_legacy_energy_actuals(api, plant_id: str, date_str: str) -> list:
         d = date_type(int(parts[0]), int(parts[1]), int(parts[2]))
         dt = datetime.combine(d, datetime.min.time())
         # Try plant_detail first (PlantDetailAPI.do)
-        back = api.plant_detail(plant_id, growattServer.Timespan.day, dt)
+        back, _ = _retry_growatt_call(api.plant_detail, plant_id, growattServer.Timespan.day, dt)
         chart = (back or {}).get("chartData") or (back or {}).get("energyData") or {}
         actuals = _parse_chart(chart)
         if actuals:
             return actuals
         # Fallback: dashboard_data (storage/Mix plants)
-        resp = api.dashboard_data(plant_id, growattServer.Timespan.day, dt)
+        resp, _ = _retry_growatt_call(api.dashboard_data, plant_id, growattServer.Timespan.day, dt)
         chart = (resp or {}).get("chartData") or (resp or {}).get("back", {}).get("chartData") or {}
         actuals = _parse_chart(chart)
         if actuals:
             return actuals
         # Fallback: plant_energy_data (TLX systems)
         if hasattr(api, "plant_energy_data"):
-            ped = api.plant_energy_data(plant_id)
+            ped, _ = _retry_growatt_call(api.plant_energy_data, plant_id)
             chart = (ped or {}).get("chartData") or (ped or {}).get("back", {}).get("chartData") or {}
             return _parse_chart(chart)
     except Exception:
@@ -179,6 +206,8 @@ if "plant_id" not in st.session_state:
     st.session_state["plant_id"] = None
 if "inverter_sn" not in st.session_state:
     st.session_state["inverter_sn"] = None
+if "growatt_502" not in st.session_state:
+    st.session_state["growatt_502"] = False
 
 # Auto-refresh every 10 minutes to avoid hitting Growatt rate limits
 st_autorefresh_ms = 10 * 60 * 1000
@@ -338,11 +367,14 @@ with st.sidebar:
                 api_login = _create_growatt_api()
                 login_resp = api_login.login(username.strip(), password)
                 if login_resp.get("success"):
+                    st.session_state["growatt_502"] = False
                     user_id = login_resp.get("userId") or (login_resp.get("user") or {}).get("id")
                     if not user_id:
                         st.error("Login succeeded but no user ID returned")
                     else:
-                        plants_list = api_login.plant_list(str(user_id))
+                        plants_list, pl_err = _retry_growatt_call(api_login.plant_list, str(user_id))
+                        if pl_err is not None:
+                            plants_list = None
                         plants = plants_list if plants_list else login_resp.get("data") or login_resp.get("back")
                         if isinstance(plants, list) and len(plants) > 0:
                             plant_info = plants[0]
@@ -356,11 +388,19 @@ with st.sidebar:
                             st.session_state["growatt_api"] = api_login
                             st.session_state["plant_id"] = str(pid_val)
                             st.session_state["plants"] = plants_list or plants
+                            # Regional server: use get_url_by_type for Abamu residence if available
+                            try:
+                                if hasattr(api_login, "get_url_by_type"):
+                                    url = api_login.get_url_by_type()
+                                    if url:
+                                        api_login.server_url = url if url.endswith("/") else url + "/"
+                            except Exception:
+                                pass
                             # Waterfall: fetch inverter_list (device_list) for this plant
                             inv_sn = None
                             try:
-                                devices = api_login.device_list(str(pid_val))
-                                dev_list = devices if isinstance(devices, list) else (devices.get("deviceList") or devices.get("device_list") or [])
+                                devices, _ = _retry_growatt_call(api_login.device_list, str(pid_val))
+                                dev_list = devices if isinstance(devices, list) else (devices.get("deviceList") or devices.get("device_list") or []) if devices else []
                                 if isinstance(dev_list, dict):
                                     dev_list = list(dev_list.values()) if dev_list else []
                                 for dev in (dev_list or []):
@@ -402,6 +442,9 @@ cloud_cover_pct = st.sidebar.slider("Cloud cover (%)", 0, 100, 0, help="Prioriti
 cloud_cover = float(cloud_cover_pct) / 100.0
 snow_override = st.sidebar.toggle("Snow Override", value=False, help="Drop prediction to 0; flag February as Snow-Locked")
 d_str = selected_date.strftime("%Y-%m-%d")
+
+if st.session_state.get("growatt_502"):
+    st.info("**Growatt Servers Busy. Displaying Physics-Based Prediction Only.**")
 
 # Resolve api and plant_id for data fetch (updated after login)
 api = st.session_state.get("growatt_api")
@@ -453,8 +496,8 @@ if "plant_id" in st.session_state and st.session_state.get("plant_id") and api:
         # Deep Data Discovery: if plants exist but data is 0, force fetch device_list[0]['deviceSn']
         if not actuals and st.session_state.get("plants"):
             try:
-                device_list = api.device_list(_pid)
-                dev_list = device_list if isinstance(device_list, list) else (device_list.get("deviceList") or device_list.get("device_list") or [])
+                device_list, _ = _retry_growatt_call(api.device_list, _pid)
+                dev_list = device_list if isinstance(device_list, list) else (device_list.get("deviceList") or device_list.get("device_list") or []) if device_list else []
                 if isinstance(dev_list, dict):
                     dev_list = list(dev_list.values()) if dev_list else []
                 if dev_list and len(dev_list) > 0:
@@ -475,10 +518,11 @@ if "plant_id" in st.session_state and st.session_state.get("plant_id") and api:
         _today = datetime.now(BERLIN).date() if BERLIN else datetime.now().date()
         if selected_date == _today and _inv_sn and hasattr(api, "mix_system_status"):
             try:
-                status = api.mix_system_status(_inv_sn, _pid)
-                ppv = status.get("ppv") or status.get("pPv1") or 0
-                if ppv:
-                    current_power_w = _to_float(ppv) * 1000  # kW -> W
+                status, _ = _retry_growatt_call(api.mix_system_status, _inv_sn, _pid)
+                if status:
+                    ppv = status.get("ppv") or status.get("pPv1") or 0
+                    if ppv:
+                        current_power_w = _to_float(ppv) * 1000  # kW -> W
             except Exception:
                 pass
     except Exception as e:
@@ -507,8 +551,10 @@ if actuals:
 else:
     df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0)
 
-# Physics calibration: JAM54D41-430/LB (430Wp, 80% Bifacial) is the fallback when cloud/inverter data is delayed; show green Predicted bars. When cloudy, apply 0.15 irradiance multiplier.
-if not actuals or _safe_numeric(sum(actuals)) < 0.5:
+# Data fallback: when 502 or no actuals, keep full 430Wp/80% bifacial physics for Predicted bars; only apply 0.15 when not in 502 mode and data is missing/delayed.
+if st.session_state.get("growatt_502"):
+    pass  # Keep full physics prediction when Growatt servers busy
+elif not actuals or _safe_numeric(sum(actuals)) < 0.5:
     df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0) * 0.15
 total_pre = float(df["Predicted"].sum())
 
