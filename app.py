@@ -25,7 +25,7 @@ GROWATT_GLOBAL_SERVER = "https://server.growatt.com/"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 def _create_growatt_api():
-    """Create GrowattApi with Global server and browser User-Agent."""
+    """Create GrowattApi with persistent session (cookies preserved across calls)."""
     api = growattServer.GrowattApi()
     api.server_url = GROWATT_GLOBAL_SERVER
     api.session.headers.update({"User-Agent": USER_AGENT})
@@ -370,7 +370,9 @@ with st.sidebar:
                             except Exception:
                                 pass
                             st.session_state["inverter_sn"] = str(inv_sn) if inv_sn else None
+                            plants_count = len(plants_list) if isinstance(plants_list, list) else len(plants) if isinstance(plants, list) else 0
                             st.success("Logged in!")
+                            st.write(f"Logged in. Plants found: {plants_count}")
                         else:
                             st.error("No plant ID found")
                             with st.expander("Debug: raw plants response"):
@@ -448,6 +450,23 @@ if "plant_id" in st.session_state and st.session_state.get("plant_id") and api:
             actuals = _extract_inverter_5min_data(api, _inv_sn, d_str)
         if not actuals:
             actuals = _extract_legacy_energy_actuals(api, _pid, d_str)
+        # Deep Data Discovery: if plants exist but data is 0, force fetch device_list[0]['deviceSn']
+        if not actuals and st.session_state.get("plants"):
+            try:
+                device_list = api.device_list(_pid)
+                dev_list = device_list if isinstance(device_list, list) else (device_list.get("deviceList") or device_list.get("device_list") or [])
+                if isinstance(dev_list, dict):
+                    dev_list = list(dev_list.values()) if dev_list else []
+                if dev_list and len(dev_list) > 0:
+                    first_dev = dev_list[0] if isinstance(dev_list[0], dict) else {}
+                    _inv_sn = first_dev.get("deviceSn") or first_dev.get("serialNum") or first_dev.get("id")
+                    if _inv_sn:
+                        st.session_state["inverter_sn"] = str(_inv_sn)
+                        actuals = _extract_inverter_5min_data(api, _inv_sn, d_str)
+                        if not actuals:
+                            actuals = _extract_legacy_energy_actuals(api, _pid, d_str)
+            except Exception:
+                pass
         if actuals:
             sync_msg = "🟢 Online"
             last_sync = datetime.now().strftime("%H:%M:%S")
@@ -587,7 +606,7 @@ with tab_hour:
     )
     pred_max = float(pd.to_numeric(df["Predicted"], errors="coerce").fillna(0).max())
     actual_max = float(pd.to_numeric(df["Actual"], errors="coerce").fillna(0).max()) if "Actual" in df.columns else 0.0
-    max_yield = max(pred_max, actual_max, 0.01)
+    max_yield = max(7.5, pred_max, actual_max, 0.01)
     fig.update_yaxes(
         range=[0, max_yield],
         fixedrange=True,
@@ -631,6 +650,7 @@ with tab_day:
     day_dates = [selected_date - timedelta(days=i) for i in range(6, -1, -1)]
     day_actuals = []
     day_preds = []
+    day_tab_error = None
     for d in day_dates:
         ds = d.strftime("%Y-%m-%d")
         pdf = get_varel_prediction(ds, cloud_cover)
@@ -643,16 +663,19 @@ with tab_day:
                     day_actuals_list = _extract_legacy_energy_actuals(api, st.session_state["plant_id"], ds)
                     tot = float(sum(day_actuals_list)) if day_actuals_list else 0.0
                 day_actuals.append(tot)
-            except Exception:
+            except Exception as e:
                 day_actuals.append(0.0)
+                day_tab_error = str(e)
         else:
             day_actuals.append(0.0)
+    if day_tab_error and sum(day_actuals) == 0:
+        st.error(f"Day tab: get_plant_history failed — {day_tab_error}")
     day_actuals = [float(pd.to_numeric(x, errors="coerce").fillna(0)) for x in day_actuals]
     day_preds = [float(pd.to_numeric(x, errors="coerce").fillna(0)) for x in day_preds]
     fig_day = go.Figure()
     fig_day.add_trace(go.Bar(x=[d.strftime("%a %d") for d in day_dates], y=day_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
     fig_day.add_trace(go.Bar(x=[d.strftime("%a %d") for d in day_dates], y=day_actuals, name="Actual", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
-    max_day = max(max(day_actuals or [0]), max(day_preds or [0]), 0.01)
+    max_day = max(7.5, max(day_actuals or [0]), max(day_preds or [0]), 0.01)
     fig_day.update_yaxes(range=[0, max_day], fixedrange=True, nticks=4, title_text="Yield (kWh)")
     fig_day.update_layout(
         template="plotly_dark",
@@ -675,6 +698,7 @@ with tab_month:
     month_labels = []
     month_actuals = []
     month_preds = []
+    month_tab_error = None
     y, m = now.year, now.month
     for _ in range(12):
         month_labels.append(datetime(y, m, 1).strftime("%b %Y"))
@@ -687,20 +711,23 @@ with tab_month:
             try:
                 tot = _get_plant_history_total(api, st.session_state["plant_id"], ds, growattServer.Timespan.month)
                 month_actuals.append(tot if tot > 0 else (daily_total_kwh if y == now.year and m == now.month else 0.0))
-            except Exception:
+            except Exception as e:
                 month_actuals.append(daily_total_kwh if y == now.year and m == now.month else 0.0)
+                month_tab_error = str(e)
         else:
             month_actuals.append(daily_total_kwh if y == now.year and m == now.month else 0.0)
         m -= 1
         if m < 1:
             m, y = 12, y - 1
+    if month_tab_error and sum(month_actuals) == 0:
+        st.error(f"Month tab: get_plant_history failed — {month_tab_error}")
     month_labels.reverse()
     month_actuals.reverse()
     month_preds.reverse()
     fig_month = go.Figure()
     fig_month.add_trace(go.Bar(x=month_labels, y=month_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
     fig_month.add_trace(go.Bar(x=month_labels, y=month_actuals, name="Actual", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
-    max_month = max(max(month_actuals or [0]), max(month_preds or [0]), 0.01)
+    max_month = max(7.5, max(month_actuals or [0]), max(month_preds or [0]), 0.01)
     fig_month.update_yaxes(range=[0, max_month], fixedrange=True, nticks=4, title_text="Yield (kWh)")
     fig_month.update_layout(
         template="plotly_dark",
@@ -722,6 +749,7 @@ with tab_year:
     year_labels = [str(now.year - 2), str(now.year - 1), str(now.year)]
     year_actuals = [0.0, 0.0, 0.0]
     year_preds = [0.0, 0.0, 0.0]
+    year_tab_error = None
     if "plant_id" in st.session_state and st.session_state.get("plant_id") and api is not None:
         for i, yr in enumerate([now.year - 2, now.year - 1, now.year]):
             for mo in range(1, 13):
@@ -729,17 +757,19 @@ with tab_year:
                 try:
                     tot = _get_plant_history_total(api, st.session_state["plant_id"], ds, growattServer.Timespan.month)
                     year_actuals[i] += tot
-                except Exception:
-                    pass
+                except Exception as e:
+                    year_tab_error = str(e)
             if yr == now.year:
                 year_actuals[i] = max(year_actuals[i], daily_total_kwh)
     else:
         year_actuals[2] = daily_total_kwh if selected_date.year == now.year else 0.0
+    if year_tab_error and sum(year_actuals) == 0:
+        st.error(f"Year tab: get_plant_history failed — {year_tab_error}")
     year_preds[2] = 0.0 if snow_override else (pred_total_kwh if selected_date.year == now.year else 0.0)
     fig_year = go.Figure()
     fig_year.add_trace(go.Bar(x=year_labels, y=year_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
     fig_year.add_trace(go.Bar(x=year_labels, y=year_actuals, name="Actual", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
-    max_year = max(max(year_actuals or [0]), max(year_preds or [0]), 0.01)
+    max_year = max(7.5, max(year_actuals or [0]), max(year_preds or [0]), 0.01)
     fig_year.update_yaxes(range=[0, max_year], fixedrange=True, nticks=4, title_text="Yield (kWh)")
     fig_year.update_layout(
         template="plotly_dark",
