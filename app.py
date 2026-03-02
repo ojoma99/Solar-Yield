@@ -42,6 +42,71 @@ def _to_float(val) -> float:
         return 0.0
 
 
+def _extract_inverter_5min_data(api, inverter_sn: str, date_str: str) -> list:
+    """Extract 5-min energy (kWh) from api.inverter_data(inverter_sn, date) for Hour tab Neon Yellow bars."""
+    def _parse_chart(chart: dict) -> list:
+        if not chart:
+            return []
+        keys = sorted(k for k in chart if isinstance(k, str) and ":" in k)
+        out = []
+        for k in keys:
+            val = chart.get(k)
+            ppv = 0.0
+            if isinstance(val, dict):
+                ppv = _to_float(val.get("ppv") or val.get("ppv1") or 0)
+            elif isinstance(val, (int, float)):
+                ppv = float(val)
+            out.append(max(0.0, ppv * (5.0 / 60.0)))
+        return out
+
+    try:
+        from datetime import date as date_type
+        parts = date_str.split("-")
+        if len(parts) != 3:
+            return []
+        d = date_type(int(parts[0]), int(parts[1]), int(parts[2]))
+        dt = datetime.combine(d, datetime.min.time())
+        resp = api.inverter_data(inverter_sn, dt)
+        chart = (resp or {}).get("chartData") or (resp or {}).get("back", {}).get("chartData") or {}
+        actuals = _parse_chart(chart)
+        if actuals:
+            return actuals
+        if hasattr(api, "tlx_data"):
+            tlx_resp = api.tlx_data(inverter_sn, dt)
+            chart = (tlx_resp or {}).get("chartData") or (tlx_resp or {}).get("back", {}).get("chartData") or {}
+            return _parse_chart(chart)
+    except Exception:
+        pass
+    return []
+
+
+def _get_plant_history_total(api, plant_id: str, date_str: str, timespan) -> float:
+    """Get daily/monthly total (kWh) from plant_detail for Day/Month/Year tabs."""
+    try:
+        from datetime import date as date_type
+        parts = date_str.split("-")
+        if len(parts) >= 2:
+            y, m = int(parts[0]), int(parts[1])
+            d = int(parts[2]) if len(parts) >= 3 else 1
+            dt = datetime(y, m, d)
+        else:
+            return 0.0
+        back = api.plant_detail(plant_id, timespan, dt)
+        total = (back or {}).get("totalData") or {}
+        if isinstance(total, dict):
+            for key in ("energy", "dayTotal", "day_total", "eTotal", "monthTotal", "month_total"):
+                v = total.get(key)
+                if v is not None:
+                    return _to_float(str(v).replace("kWh", "").strip())
+        chart = (back or {}).get("chartData") or {}
+        if chart:
+            keys = sorted(k for k in chart if isinstance(k, str) and ":" in k)
+            return sum(max(0.0, _to_float((chart.get(k) or {}).get("ppv", 0)) * (5.0 / 60.0)) for k in keys)
+        return 0.0
+    except Exception:
+        return 0.0
+
+
 def _extract_legacy_energy_actuals(api, plant_id: str, date_str: str) -> list:
     """Extract 5-min energy (kWh) list from legacy GrowattApi (plant_detail or dashboard_data)."""
     def _parse_chart(chart: dict) -> list:
@@ -112,6 +177,8 @@ if "growatt_api" not in st.session_state:
     st.session_state["growatt_api"] = None
 if "plant_id" not in st.session_state:
     st.session_state["plant_id"] = None
+if "inverter_sn" not in st.session_state:
+    st.session_state["inverter_sn"] = None
 
 # Auto-refresh every 10 minutes to avoid hitting Growatt rate limits
 st_autorefresh_ms = 10 * 60 * 1000
@@ -289,6 +356,20 @@ with st.sidebar:
                             st.session_state["growatt_api"] = api_login
                             st.session_state["plant_id"] = str(pid_val)
                             st.session_state["plants"] = plants_list or plants
+                            # Waterfall: fetch inverter_list (device_list) for this plant
+                            inv_sn = None
+                            try:
+                                devices = api_login.device_list(str(pid_val))
+                                dev_list = devices if isinstance(devices, list) else (devices.get("deviceList") or devices.get("device_list") or [])
+                                if isinstance(dev_list, dict):
+                                    dev_list = list(dev_list.values()) if dev_list else []
+                                for dev in (dev_list or []):
+                                    inv_sn = dev.get("deviceSn") or dev.get("serialNum") or dev.get("id") or dev.get("inverterSn")
+                                    if inv_sn:
+                                        break
+                            except Exception:
+                                pass
+                            st.session_state["inverter_sn"] = str(inv_sn) if inv_sn else None
                             st.success("Logged in!")
                         else:
                             st.error("No plant ID found")
@@ -350,36 +431,39 @@ def _extract_energy(val) -> float:
     return _safe_numeric(val)
 
 
-# Growatt: fetch energy data when logged in (api + plant_id persisted in session_state)
+# Growatt: waterfall fetch — plant_id + inverter_sn from session_state
 actuals = []
 current_power_w = None
 sync_msg = "Login to sync" if not (api and _pid) else "Inverter Syncing..."
 last_sync = "N/A"
+data_fetching = False
 
 if "plant_id" in st.session_state and st.session_state.get("plant_id") and api:
     _pid = st.session_state["plant_id"]
+    _inv_sn = st.session_state.get("inverter_sn")
+    data_fetching = True
     try:
-        # Legacy GrowattApi: dashboard_data / plant_detail
-        actuals = _extract_legacy_energy_actuals(api, _pid, d_str)
+        # Hour tab: 5-min data from inverter_data (requires inverter_sn)
+        if _inv_sn:
+            actuals = _extract_inverter_5min_data(api, _inv_sn, d_str)
+        if not actuals:
+            actuals = _extract_legacy_energy_actuals(api, _pid, d_str)
         if actuals:
             sync_msg = "🟢 Online"
             last_sync = datetime.now().strftime("%H:%M:%S")
-        # Current power: try mix_system_status or tlx if we have device ids (optional)
+        data_fetching = False
+        # Current power: mix_system_status when inverter_sn available
         _today = datetime.now(BERLIN).date() if BERLIN else datetime.now().date()
-        if selected_date == _today:
+        if selected_date == _today and _inv_sn and hasattr(api, "mix_system_status"):
             try:
-                devices = getattr(api, "device_list", lambda _: [])(_pid)
-                for dev in (devices or [])[:1]:
-                    sn = dev.get("deviceSn") or dev.get("serialNum") or dev.get("id")
-                    if sn:
-                        status = api.mix_system_status(sn, _pid) if hasattr(api, "mix_system_status") else {}
-                        ppv = status.get("ppv") or status.get("pPv1") or 0
-                        if ppv:
-                            current_power_w = _to_float(ppv) * 1000  # kW -> W
-                        break
+                status = api.mix_system_status(_inv_sn, _pid)
+                ppv = status.get("ppv") or status.get("pPv1") or 0
+                if ppv:
+                    current_power_w = _to_float(ppv) * 1000  # kW -> W
             except Exception:
                 pass
     except Exception as e:
+        data_fetching = False
         sync_msg = "Inverter Syncing..."
         st.sidebar.warning(f"Growatt sync failed: {e}. Physics prediction shown.")
 
@@ -430,11 +514,12 @@ st.markdown(
 )
 pred_live_kw = 0.0 if snow_override else _safe_numeric(realtime_kw)  # 430Wp / 80% bifacial; 0 when Snow Override
 pred_total_kwh = total_pre_num  # full-day integration; 0 when Snow Override
+fetch_label = "fetching..." if data_fetching else ""
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Live kW", f"{current_kw:.2f}")
-m2.metric("Pred Live", f"{pred_live_kw:.2f}")
-m3.metric("Daily kWh", f"{daily_total_kwh:.1f}")
-m4.metric("Pred Daily", f"{pred_total_kwh:.1f}")
+m1.metric("Live kW", fetch_label or f"{current_kw:.2f}")
+m2.metric("Pred Live", fetch_label or f"{pred_live_kw:.2f}")
+m3.metric("Daily kWh", fetch_label or f"{daily_total_kwh:.1f}")
+m4.metric("Pred Daily", fetch_label or f"{pred_total_kwh:.1f}")
 
 # Snow-Locked flag for February when Snow Override is ON
 if snow_override and selected_date.month == 2:
@@ -502,9 +587,9 @@ with tab_hour:
     )
     pred_max = float(pd.to_numeric(df["Predicted"], errors="coerce").fillna(0).max())
     actual_max = float(pd.to_numeric(df["Actual"], errors="coerce").fillna(0).max()) if "Actual" in df.columns else 0.0
-    max_val = max(pred_max, actual_max, 0.01)
+    max_yield = max(pred_max, actual_max, 0.01)
     fig.update_yaxes(
-        range=[0, max_val],
+        range=[0, max_yield],
         fixedrange=True,
         nticks=4,
         title_text="Yield (kWh)",
@@ -553,8 +638,11 @@ with tab_day:
         day_preds.append(0.0 if snow_override else day_pred)
         if "plant_id" in st.session_state and st.session_state.get("plant_id") and api is not None:
             try:
-                day_actuals_list = _extract_legacy_energy_actuals(api, st.session_state["plant_id"], ds)
-                day_actuals.append(float(sum(day_actuals_list)) if day_actuals_list else 0.0)
+                tot = _get_plant_history_total(api, st.session_state["plant_id"], ds, growattServer.Timespan.day)
+                if tot <= 0:
+                    day_actuals_list = _extract_legacy_energy_actuals(api, st.session_state["plant_id"], ds)
+                    tot = float(sum(day_actuals_list)) if day_actuals_list else 0.0
+                day_actuals.append(tot)
             except Exception:
                 day_actuals.append(0.0)
         else:
@@ -581,7 +669,7 @@ with tab_day:
     )
     st.plotly_chart(fig_day, use_container_width=True, key="abamu_day_chart", config={"displayModeBar": False})
 
-# ---------- MONTH TAB: Last 12 months (current month from daily; rest placeholder) ----------
+# ---------- MONTH TAB: Last 12 months via plant_detail(plant_id, Timespan.month) ----------
 with tab_month:
     now = datetime.now(BERLIN).date() if BERLIN else datetime.now().date()
     month_labels = []
@@ -590,12 +678,19 @@ with tab_month:
     y, m = now.year, now.month
     for _ in range(12):
         month_labels.append(datetime(y, m, 1).strftime("%b %Y"))
+        ds = f"{y}-{m:02d}-01"
         if y == now.year and m == now.month:
-            month_actuals.append(daily_total_kwh)
-            month_preds.append(pred_total_kwh)
+            month_preds.append(0.0 if snow_override else pred_total_kwh)
         else:
-            month_actuals.append(0.0)
             month_preds.append(0.0)
+        if "plant_id" in st.session_state and st.session_state.get("plant_id") and api is not None:
+            try:
+                tot = _get_plant_history_total(api, st.session_state["plant_id"], ds, growattServer.Timespan.month)
+                month_actuals.append(tot if tot > 0 else (daily_total_kwh if y == now.year and m == now.month else 0.0))
+            except Exception:
+                month_actuals.append(daily_total_kwh if y == now.year and m == now.month else 0.0)
+        else:
+            month_actuals.append(daily_total_kwh if y == now.year and m == now.month else 0.0)
         m -= 1
         if m < 1:
             m, y = 12, y - 1
@@ -622,11 +717,25 @@ with tab_month:
     )
     st.plotly_chart(fig_month, use_container_width=True, key="abamu_month_chart", config={"displayModeBar": False})
 
-# ---------- YEAR TAB: Last 3 years (current year from daily; rest placeholder) ----------
+# ---------- YEAR TAB: Last 3 years via plant_detail(plant_id, Timespan.month) summed ----------
 with tab_year:
     year_labels = [str(now.year - 2), str(now.year - 1), str(now.year)]
-    year_actuals = [0.0, 0.0, daily_total_kwh if selected_date.year == now.year else 0.0]
-    year_preds = [0.0, 0.0, pred_total_kwh if selected_date.year == now.year else 0.0]
+    year_actuals = [0.0, 0.0, 0.0]
+    year_preds = [0.0, 0.0, 0.0]
+    if "plant_id" in st.session_state and st.session_state.get("plant_id") and api is not None:
+        for i, yr in enumerate([now.year - 2, now.year - 1, now.year]):
+            for mo in range(1, 13):
+                ds = f"{yr}-{mo:02d}-01"
+                try:
+                    tot = _get_plant_history_total(api, st.session_state["plant_id"], ds, growattServer.Timespan.month)
+                    year_actuals[i] += tot
+                except Exception:
+                    pass
+            if yr == now.year:
+                year_actuals[i] = max(year_actuals[i], daily_total_kwh)
+    else:
+        year_actuals[2] = daily_total_kwh if selected_date.year == now.year else 0.0
+    year_preds[2] = 0.0 if snow_override else (pred_total_kwh if selected_date.year == now.year else 0.0)
     fig_year = go.Figure()
     fig_year.add_trace(go.Bar(x=year_labels, y=year_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
     fig_year.add_trace(go.Bar(x=year_labels, y=year_actuals, name="Actual", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
