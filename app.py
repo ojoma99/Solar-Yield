@@ -276,18 +276,29 @@ with st.sidebar:
                         st.error("Login succeeded but no user ID returned")
                     else:
                         plants_list = api_login.plant_list(str(user_id))
-                        if plants_list:
-                            first = plants_list[0] if isinstance(plants_list, list) else plants_list
-                            pid_val = first.get("plantId") or first.get("plant_id") or first.get("id")
-                            if pid_val is not None:
-                                st.session_state["growatt_api"] = api_login
-                                st.session_state["plant_id"] = str(pid_val)
-                                st.session_state["plants"] = plants_list
-                                st.success("Logged in!")
-                            else:
-                                st.error("No plant ID found")
+                        plants = plants_list if plants_list else login_resp.get("data") or login_resp.get("back")
+                        if isinstance(plants, list) and len(plants) > 0:
+                            plant_info = plants[0]
+                        elif isinstance(plants, dict):
+                            arr = plants.get("data") or plants.get("back") or [{}]
+                            plant_info = arr[0] if isinstance(arr, list) and arr else {}
                         else:
-                            st.error("No plants found")
+                            plant_info = {}
+                        pid_val = plant_info.get("id") or plant_info.get("plantId") or plant_info.get("plant_id")
+                        if pid_val is not None:
+                            st.session_state["growatt_api"] = api_login
+                            st.session_state["plant_id"] = str(pid_val)
+                            st.session_state["plants"] = plants_list or plants
+                            st.success("Logged in!")
+                        else:
+                            st.error("No plant ID found")
+                            with st.expander("Debug: raw plants response"):
+                                st.json({
+                                    "plants_list": plants_list,
+                                    "login_data": login_resp.get("data"),
+                                    "login_back": login_resp.get("back"),
+                                    "plant_info": plant_info,
+                                })
                 else:
                     err_msg = login_resp.get("msg") or login_resp.get("message") or "Invalid credentials"
                     st.error(f"Growatt: {err_msg}")
@@ -345,7 +356,8 @@ current_power_w = None
 sync_msg = "Login to sync" if not (api and _pid) else "Inverter Syncing..."
 last_sync = "N/A"
 
-if api and _pid:
+if "plant_id" in st.session_state and st.session_state.get("plant_id") and api:
+    _pid = st.session_state["plant_id"]
     try:
         # Legacy GrowattApi: dashboard_data / plant_detail
         actuals = _extract_legacy_energy_actuals(api, _pid, d_str)
@@ -407,9 +419,13 @@ if daily_total_kwh < 0:
 system_health_pct = (daily_total_kwh / total_pre_num * 100) if total_pre_num > 0 and actuals else (_safe_numeric(current_kw) / SYSTEM_KWP * 100) if current_kw else 0.0
 system_health_pct = _safe_numeric(system_health_pct)
 
-# Single-row metric HUD (portrait fix): force 4 metrics into one row
+# High-density layout: force 4 metrics into one row (width: 25% !important)
 st.markdown(
-    '<style>div[data-testid="column"] {width: 25% !important; flex: 1 1 25% !important; min-width: 25% !important; text-align: center;}</style>',
+    """
+    <style>
+    div[data-testid="column"] { width: 25% !important; flex: 1 1 25% !important; min-width: 25% !important; text-align: center; }
+    </style>
+    """,
     unsafe_allow_html=True,
 )
 pred_live_kw = 0.0 if snow_override else _safe_numeric(realtime_kw)  # 430Wp / 80% bifacial; 0 when Snow Override
@@ -535,9 +551,9 @@ with tab_day:
         pdf = get_varel_prediction(ds, cloud_cover)
         day_pred = float(pd.to_numeric(pdf["Predicted"], errors="coerce").fillna(0).sum())
         day_preds.append(0.0 if snow_override else day_pred)
-        if _pid and api is not None:
+        if "plant_id" in st.session_state and st.session_state.get("plant_id") and api is not None:
             try:
-                day_actuals_list = _extract_legacy_energy_actuals(api, _pid, ds)
+                day_actuals_list = _extract_legacy_energy_actuals(api, st.session_state["plant_id"], ds)
                 day_actuals.append(float(sum(day_actuals_list)) if day_actuals_list else 0.0)
             except Exception:
                 day_actuals.append(0.0)
