@@ -19,15 +19,13 @@ pio.templates.default = "plotly_dark"
 # --- SYSTEM CONFIG (Varel: 53.396°N, 8.136°E) ---
 LAT, LON = 53.396, 8.136
 LAT_RAD = math.radians(LAT)
-GROWATT_TOKEN = os.environ.get("GROWATT_TOKEN", "8d5u01rym66qw9rcf8k34414v71n3wju")
 GROWATT_SERVER = "https://openapi.growatt.com/"  # EU server (no /v1/ — library appends v1/)
 
 # Persistent browser session: realistic User-Agent; cookies stored in session after login
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-def _login(session: requests.Session) -> None:
-    """Apply token and headers to session. Re-read token from env so refreshed credentials are used. Cookies from any prior response are kept in session."""
-    token = os.environ.get("GROWATT_TOKEN", GROWATT_TOKEN)
+def _apply_token_to_session(session: requests.Session, token: str) -> None:
+    """Apply token and headers to session for Growatt API calls."""
     session.headers.update({
         "User-Agent": USER_AGENT,
         "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -43,20 +41,36 @@ def _is_auth_error(exc: BaseException) -> bool:
     msg = str(exc).lower()
     return "401" in str(exc) or "403" in str(exc) or "unauthorized" in msg or "forbidden" in msg
 
-def _check_session_and_retry(api, session: requests.Session, fetch_fn):
-    """Run fetch_fn(); if it fails with 401/403, re-run _login(), update api.session, and retry fetch_fn once. Returns (result, error)."""
+def _check_session_and_retry(api, session: requests.Session, token: str, fetch_fn):
+    """Run fetch_fn(); if it fails with 401/403, re-apply token and retry once. Returns (result, error)."""
     try:
         return fetch_fn(), None
     except Exception as e:
         if not _is_auth_error(e):
             return None, e
-        _login(session)
+        _apply_token_to_session(session, token)
         api.session = session
         api.server_url = GROWATT_SERVER
         try:
             return fetch_fn(), None
         except Exception as e2:
             return None, e2
+
+def _growatt_login_username_password(username: str, password: str) -> str | None:
+    """Try to get token from Growatt Open API using username/password. Returns token or None."""
+    if not (username and password):
+        return None
+    try:
+        url = GROWATT_SERVER.rstrip("/") + "/openApi/v1/user/login"
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": USER_AGENT, "Content-Type": "application/json"})
+        r = sess.post(url, json={"userName": username.strip(), "password": password}, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        token = (data.get("data") or {}).get("token") or data.get("token")
+        return str(token).strip() if token else None
+    except Exception:
+        return None
 
 # --- JAM54D41-430/LB Bifacial (hardcoded specs) ---
 PMAX_W = 430                    # Front Pmax
@@ -75,6 +89,16 @@ PREDICTED_COLOR = "#39FF14"  # Electric Green (real-time & predicted)
 ACTUAL_COLOR = "#FFFF00"    # Neon Yellow
 
 st.set_page_config(page_title="Varel Solar Truth", layout="wide", page_icon="⚓")
+
+# Session state for global Growatt data (all tabs)
+if "plants" not in st.session_state:
+    st.session_state["plants"] = []
+if "growatt_api" not in st.session_state:
+    st.session_state["growatt_api"] = None
+if "plant_id" not in st.session_state:
+    st.session_state["plant_id"] = None
+if "growatt_token" not in st.session_state:
+    st.session_state["growatt_token"] = None
 
 # Auto-refresh every 10 minutes to avoid hitting Growatt rate limits
 st_autorefresh_ms = 10 * 60 * 1000
@@ -221,10 +245,49 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+# --- Sidebar: Persistent Login ---
+with st.sidebar:
+    st.subheader("Growatt Login")
+    username = st.text_input("Username", key="growatt_username")
+    password = st.text_input("Password", type="password", key="growatt_password")
+    if st.button("Login"):
+        token = _growatt_login_username_password(username, password)
+        if token:
+            _session = requests.Session()
+            _apply_token_to_session(_session, token)
+            api_login = growattServer.OpenApiV1(token=token)
+            api_login.session = _session
+            api_login.server_url = GROWATT_SERVER
+            try:
+                plants_res = api_login.plant_list()
+                plants_list = (plants_res or {}).get("plants") or []
+                if plants_list:
+                    first_plant = plants_list[0]
+                    pid_val = first_plant.get("plant_id") or first_plant.get("id")
+                    if pid_val is not None:
+                        st.session_state["growatt_api"] = api_login
+                        st.session_state["plant_id"] = pid_val
+                        st.session_state["growatt_token"] = token
+                        st.session_state["plants"] = plants_list
+                        st.success("Logged in!")
+                    else:
+                        st.error("No plant ID found")
+                else:
+                    st.error("No plants found")
+            except Exception as e:
+                st.error(f"Login failed: {e}")
+        else:
+            st.error("Invalid credentials")
+
 selected_date = st.sidebar.date_input("Analysis Date", datetime.now().date())
 cloud_cover_pct = st.sidebar.slider("Cloud cover (%)", 0, 100, 0, help="Prioritize diffuse radiation when high; improves cloudy/low-irradiance match.")
 cloud_cover = float(cloud_cover_pct) / 100.0
+snow_override = st.sidebar.toggle("Snow Override", value=False, help="Drop prediction to 0; flag February as Snow-Locked")
 d_str = selected_date.strftime("%Y-%m-%d")
+
+# Resolve api and plant_id for data fetch (updated after login)
+api = st.session_state.get("growatt_api")
+_pid = st.session_state.get("plant_id")
 
 df = get_varel_prediction(d_str, cloud_cover)
 # Coerce prediction to numeric so all math is float (no str - str)
@@ -252,63 +315,50 @@ def _extract_energy(val) -> float:
     return _safe_numeric(val)
 
 
-# Growatt: global data fetch at top — login + plant_list so all tabs (Hour, Day, Month, Year) can use plant_id
+# Growatt: fetch energy data when logged in (api + plant_id from session_state)
 actuals = []
 current_power_w = None
-sync_msg = "Inverter Syncing..."
+sync_msg = "Login to sync" if not (api and _pid) else "Inverter Syncing..."
 last_sync = "N/A"
-plants = []
-pid = None
-_session = requests.Session()
-_login(_session)
-api = None
 
-try:
-    api = growattServer.OpenApiV1(token=os.environ.get("GROWATT_TOKEN", GROWATT_TOKEN))
+if api and _pid:
+    _token = st.session_state.get("growatt_token")
+    _session = getattr(api, "session", None) or requests.Session()
+    if _token:
+        _apply_token_to_session(_session, _token)
     api.session = _session
     api.server_url = GROWATT_SERVER
-    plants_res, auth_err = _check_session_and_retry(api, _session, lambda: api.plant_list())
-    if auth_err:
-        raise auth_err
-    if plants_res is None:
-        _login(_session)
-        api.session = _session
-        plants_res = api.plant_list()
-    plants = (plants_res or {}).get("plants") or []
-    if plants:
-        first_plant = plants[0]
-        pid = first_plant.get("plant_id") or first_plant.get("id")
-        if pid is not None:
-            hist = api.plant_energy_history(pid, d_str, d_str, "day", 1, 300)
-            if hist is None:
-                hist = api.plant_energy_history(pid, d_str, d_str, "day", 1, 300)  # retry
-            energy_list = (hist or {}).get("energy_data") or (hist or {}).get("dayPackage") or []
-            if isinstance(energy_list, list):
-                raw = [_extract_energy(x) for x in energy_list]
-                actuals = list(pd.to_numeric(raw, errors="coerce").fillna(0))
-            if actuals:
-                sync_msg = "🟢 Online"
-                last_sync = datetime.now().strftime("%H:%M:%S")
-            _today = datetime.now(BERLIN).date() if BERLIN else datetime.now().date()
-            if selected_date == _today:
-                try:
-                    power_data = api.plant_power_overview(pid, selected_date)
-                    powers = (power_data or {}).get("powers") or []
-                    if powers:
-                        valid = [p for p in powers if p.get("power") is not None]
-                        if valid:
-                            p = valid[-1].get("power")
-                            current_power_w = _safe_numeric(p) if p is not None else None
-                            if current_power_w is not None and current_power_w < 0:
-                                current_power_w = None
-                except Exception:
-                    pass
-except growattServer.GrowattV1ApiError as e:
-    sync_msg = "Inverter Syncing..."
-    st.sidebar.warning(f"Growatt: {getattr(e, 'error_msg', str(e))}. Check token at openapi.growatt.com.")
-except Exception as e:
-    sync_msg = "Inverter Syncing..."
-    st.sidebar.warning(f"Growatt sync failed: {e}. Physics prediction shown.")
+    try:
+        hist = api.plant_energy_history(_pid, d_str, d_str, "day", 1, 300)
+        if hist is None:
+            hist = api.plant_energy_history(_pid, d_str, d_str, "day", 1, 300)
+        energy_list = (hist or {}).get("energy_data") or (hist or {}).get("dayPackage") or []
+        if isinstance(energy_list, list):
+            raw = [_extract_energy(x) for x in energy_list]
+            actuals = list(pd.to_numeric(raw, errors="coerce").fillna(0))
+        if actuals:
+            sync_msg = "🟢 Online"
+            last_sync = datetime.now().strftime("%H:%M:%S")
+        _today = datetime.now(BERLIN).date() if BERLIN else datetime.now().date()
+        if selected_date == _today:
+            try:
+                power_data = api.plant_power_overview(_pid, selected_date)
+                powers = (power_data or {}).get("powers") or []
+                if powers:
+                    valid = [p for p in powers if p.get("power") is not None]
+                    if valid:
+                        p = valid[-1].get("power")
+                        current_power_w = _safe_numeric(p) if p is not None else None
+                        if current_power_w is not None and current_power_w < 0:
+                            current_power_w = None
+            except Exception:
+                pass
+    except growattServer.GrowattV1ApiError as e:
+        sync_msg = "Inverter Syncing..."
+        st.sidebar.warning(f"Growatt: {getattr(e, 'error_msg', str(e))}. Re-login may help.")
+    except Exception as e:
+        sync_msg = "Inverter Syncing..."
+        st.sidebar.warning(f"Growatt sync failed: {e}. Physics prediction shown.")
 
 # --- 3. DISPLAY ---
 with st.sidebar:
@@ -316,6 +366,11 @@ with st.sidebar:
     st.write(f"Growatt Status: {sync_msg}")
     st.write(f"Last Sync: {last_sync}")
     show_clouds = st.toggle("Enable Cloud Overlay", value=True)
+
+# Snow Override: drop prediction to 0 when enabled
+if snow_override:
+    df["Predicted"] = 0.0
+    df["Cloud_Cover"] = 0.0  # clear cloud overlay when snow-locked
 
 # Align df with actuals; all yield/power numeric before any subtraction (fix str - str)
 if actuals:
@@ -346,13 +401,17 @@ st.markdown(
     '<style>div[data-testid="column"] {width: 25% !important; flex: 1 1 25% !important; min-width: 25% !important; text-align: center;}</style>',
     unsafe_allow_html=True,
 )
-pred_live_kw = _safe_numeric(realtime_kw)  # 430Wp / 80% bifacial at current solar position
-pred_total_kwh = total_pre_num             # full-day integration (JAM54D41-430/LB)
+pred_live_kw = 0.0 if snow_override else _safe_numeric(realtime_kw)  # 430Wp / 80% bifacial; 0 when Snow Override
+pred_total_kwh = total_pre_num  # full-day integration; 0 when Snow Override
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Live kW", f"{current_kw:.2f}")
 m2.metric("Pred Live", f"{pred_live_kw:.2f}")
 m3.metric("Daily kWh", f"{daily_total_kwh:.1f}")
 m4.metric("Pred Daily", f"{pred_total_kwh:.1f}")
+
+# Snow-Locked flag for February when Snow Override is ON
+if snow_override and selected_date.month == 2:
+    st.info("❄️ **Snow-Locked** — February records: prediction overridden to 0.")
 
 # --- Navigation Tabs (Growatt-style time-series) ---
 tab_hour, tab_day, tab_month, tab_year = st.tabs(["Hour", "Day", "Month", "Year"])
@@ -463,10 +522,11 @@ with tab_day:
     for d in day_dates:
         ds = d.strftime("%Y-%m-%d")
         pdf = get_varel_prediction(ds, cloud_cover)
-        day_preds.append(float(pd.to_numeric(pdf["Predicted"], errors="coerce").fillna(0).sum()))
+        day_pred = float(pd.to_numeric(pdf["Predicted"], errors="coerce").fillna(0).sum())
+        day_preds.append(0.0 if snow_override else day_pred)
         if _pid and api is not None:
             try:
-                h = api.plant_energy_history(pid, ds, ds, "day", 1, 300)
+                h = api.plant_energy_history(_pid, ds, ds, "day", 1, 300)
                 el = (h or {}).get("energy_data") or (h or {}).get("dayPackage") or []
                 day_actuals.append(float(pd.to_numeric([_extract_energy(x) for x in el], errors="coerce").fillna(0).sum()) if isinstance(el, list) else 0.0)
             except Exception:
