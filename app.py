@@ -19,58 +19,73 @@ pio.templates.default = "plotly_dark"
 # --- SYSTEM CONFIG (Varel: 53.396°N, 8.136°E) ---
 LAT, LON = 53.396, 8.136
 LAT_RAD = math.radians(LAT)
-GROWATT_SERVER = "https://openapi.growatt.com/"  # EU server (no /v1/ — library appends v1/)
+GROWATT_GLOBAL_SERVER = "https://server.growatt.com/"
 
-# Persistent browser session: realistic User-Agent; cookies stored in session after login
+# Browser emulation: identify as standard browser to avoid 'Invalid Credentials' / server rejection
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-def _apply_token_to_session(session: requests.Session, token: str) -> None:
-    """Apply token and headers to session for Growatt API calls."""
-    session.headers.update({
-        "User-Agent": USER_AGENT,
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Pragma": "no-cache",
-        "token": token,
-    })
+def _create_growatt_api():
+    """Create GrowattApi with Global server and browser User-Agent."""
+    api = growattServer.GrowattApi()
+    api.server_url = GROWATT_GLOBAL_SERVER
+    api.session.headers.update({"User-Agent": USER_AGENT})
+    return api
 
-def _is_auth_error(exc: BaseException) -> bool:
-    """True if exception indicates 401 Unauthorized or 403 Forbidden."""
-    code = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
-    if code in (401, 403):
-        return True
-    msg = str(exc).lower()
-    return "401" in str(exc) or "403" in str(exc) or "unauthorized" in msg or "forbidden" in msg
 
-def _check_session_and_retry(api, session: requests.Session, token: str, fetch_fn):
-    """Run fetch_fn(); if it fails with 401/403, re-apply token and retry once. Returns (result, error)."""
+def _to_float(val) -> float:
+    """Coerce value to float; return 0.0 on failure."""
+    if val is None:
+        return 0.0
     try:
-        return fetch_fn(), None
-    except Exception as e:
-        if not _is_auth_error(e):
-            return None, e
-        _apply_token_to_session(session, token)
-        api.session = session
-        api.server_url = GROWATT_SERVER
-        try:
-            return fetch_fn(), None
-        except Exception as e2:
-            return None, e2
+        return float(val)
+    except (TypeError, ValueError):
+        return 0.0
 
-def _growatt_login_username_password(username: str, password: str) -> str | None:
-    """Try to get token from Growatt Open API using username/password. Returns token or None."""
-    if not (username and password):
-        return None
+
+def _extract_legacy_energy_actuals(api, plant_id: str, date_str: str) -> list:
+    """Extract 5-min energy (kWh) list from legacy GrowattApi (plant_detail or dashboard_data)."""
+    def _parse_chart(chart: dict) -> list:
+        if not chart:
+            return []
+        keys = sorted(k for k in chart if isinstance(k, str) and ":" in k)
+        out = []
+        for k in keys:
+            val = chart.get(k)
+            ppv = 0.0
+            if isinstance(val, dict):
+                ppv = _to_float(val.get("ppv") or val.get("ppv1") or 0)
+            elif isinstance(val, (int, float)):
+                ppv = float(val)
+            out.append(max(0.0, ppv * (5.0 / 60.0)))
+        return out
+
     try:
-        url = GROWATT_SERVER.rstrip("/") + "/openApi/v1/user/login"
-        sess = requests.Session()
-        sess.headers.update({"User-Agent": USER_AGENT, "Content-Type": "application/json"})
-        r = sess.post(url, json={"userName": username.strip(), "password": password}, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        token = (data.get("data") or {}).get("token") or data.get("token")
-        return str(token).strip() if token else None
+        from datetime import date as date_type
+        parts = date_str.split("-")
+        if len(parts) != 3:
+            return []
+        d = date_type(int(parts[0]), int(parts[1]), int(parts[2]))
+        dt = datetime.combine(d, datetime.min.time())
+        # Try plant_detail first (PlantDetailAPI.do)
+        back = api.plant_detail(plant_id, growattServer.Timespan.day, dt)
+        chart = (back or {}).get("chartData") or (back or {}).get("energyData") or {}
+        actuals = _parse_chart(chart)
+        if actuals:
+            return actuals
+        # Fallback: dashboard_data (storage/Mix plants)
+        resp = api.dashboard_data(plant_id, growattServer.Timespan.day, dt)
+        chart = (resp or {}).get("chartData") or (resp or {}).get("back", {}).get("chartData") or {}
+        actuals = _parse_chart(chart)
+        if actuals:
+            return actuals
+        # Fallback: plant_energy_data (TLX systems)
+        if hasattr(api, "plant_energy_data"):
+            ped = api.plant_energy_data(plant_id)
+            chart = (ped or {}).get("chartData") or (ped or {}).get("back", {}).get("chartData") or {}
+            return _parse_chart(chart)
     except Exception:
-        return None
+        pass
+    return []
 
 # --- JAM54D41-430/LB Bifacial (hardcoded specs) ---
 PMAX_W = 430                    # Front Pmax
@@ -97,8 +112,6 @@ if "growatt_api" not in st.session_state:
     st.session_state["growatt_api"] = None
 if "plant_id" not in st.session_state:
     st.session_state["plant_id"] = None
-if "growatt_token" not in st.session_state:
-    st.session_state["growatt_token"] = None
 
 # Auto-refresh every 10 minutes to avoid hitting Growatt rate limits
 st_autorefresh_ms = 10 * 60 * 1000
@@ -245,39 +258,50 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-# --- Sidebar: Persistent Login ---
+# --- Sidebar: Persistent Login (GrowattApi + Global server + browser User-Agent) ---
 with st.sidebar:
     st.subheader("Growatt Login")
     username = st.text_input("Username", key="growatt_username")
     password = st.text_input("Password", type="password", key="growatt_password")
     if st.button("Login"):
-        token = _growatt_login_username_password(username, password)
-        if token:
-            _session = requests.Session()
-            _apply_token_to_session(_session, token)
-            api_login = growattServer.OpenApiV1(token=token)
-            api_login.session = _session
-            api_login.server_url = GROWATT_SERVER
+        if not (username and password):
+            st.error("Enter username and password")
+        else:
             try:
-                plants_res = api_login.plant_list()
-                plants_list = (plants_res or {}).get("plants") or []
-                if plants_list:
-                    first_plant = plants_list[0]
-                    pid_val = first_plant.get("plant_id") or first_plant.get("id")
-                    if pid_val is not None:
-                        st.session_state["growatt_api"] = api_login
-                        st.session_state["plant_id"] = pid_val
-                        st.session_state["growatt_token"] = token
-                        st.session_state["plants"] = plants_list
-                        st.success("Logged in!")
+                api_login = _create_growatt_api()
+                login_resp = api_login.login(username.strip(), password)
+                if login_resp.get("success"):
+                    user_id = login_resp.get("userId") or (login_resp.get("user") or {}).get("id")
+                    if not user_id:
+                        st.error("Login succeeded but no user ID returned")
                     else:
-                        st.error("No plant ID found")
+                        plants_list = api_login.plant_list(str(user_id))
+                        if plants_list:
+                            first = plants_list[0] if isinstance(plants_list, list) else plants_list
+                            pid_val = first.get("plantId") or first.get("plant_id") or first.get("id")
+                            if pid_val is not None:
+                                st.session_state["growatt_api"] = api_login
+                                st.session_state["plant_id"] = str(pid_val)
+                                st.session_state["plants"] = plants_list
+                                st.success("Logged in!")
+                            else:
+                                st.error("No plant ID found")
+                        else:
+                            st.error("No plants found")
                 else:
-                    st.error("No plants found")
+                    err_msg = login_resp.get("msg") or login_resp.get("message") or "Invalid credentials"
+                    st.error(f"Growatt: {err_msg}")
+            except requests.exceptions.RequestException as e:
+                err = str(e)
+                if hasattr(e, "response") and e.response is not None:
+                    try:
+                        body = e.response.json()
+                        err = body.get("msg") or body.get("message") or body.get("back", {}).get("msg") or err
+                    except Exception:
+                        pass
+                st.error(f"Network/Server: {err}")
             except Exception as e:
                 st.error(f"Login failed: {e}")
-        else:
-            st.error("Invalid credentials")
 
 selected_date = st.sidebar.date_input("Analysis Date", datetime.now().date())
 cloud_cover_pct = st.sidebar.slider("Cloud cover (%)", 0, 100, 0, help="Prioritize diffuse radiation when high; improves cloudy/low-irradiance match.")
@@ -315,47 +339,34 @@ def _extract_energy(val) -> float:
     return _safe_numeric(val)
 
 
-# Growatt: fetch energy data when logged in (api + plant_id from session_state)
+# Growatt: fetch energy data when logged in (api + plant_id persisted in session_state)
 actuals = []
 current_power_w = None
 sync_msg = "Login to sync" if not (api and _pid) else "Inverter Syncing..."
 last_sync = "N/A"
 
 if api and _pid:
-    _token = st.session_state.get("growatt_token")
-    _session = getattr(api, "session", None) or requests.Session()
-    if _token:
-        _apply_token_to_session(_session, _token)
-    api.session = _session
-    api.server_url = GROWATT_SERVER
     try:
-        hist = api.plant_energy_history(_pid, d_str, d_str, "day", 1, 300)
-        if hist is None:
-            hist = api.plant_energy_history(_pid, d_str, d_str, "day", 1, 300)
-        energy_list = (hist or {}).get("energy_data") or (hist or {}).get("dayPackage") or []
-        if isinstance(energy_list, list):
-            raw = [_extract_energy(x) for x in energy_list]
-            actuals = list(pd.to_numeric(raw, errors="coerce").fillna(0))
+        # Legacy GrowattApi: dashboard_data / plant_detail
+        actuals = _extract_legacy_energy_actuals(api, _pid, d_str)
         if actuals:
             sync_msg = "🟢 Online"
             last_sync = datetime.now().strftime("%H:%M:%S")
+        # Current power: try mix_system_status or tlx if we have device ids (optional)
         _today = datetime.now(BERLIN).date() if BERLIN else datetime.now().date()
         if selected_date == _today:
             try:
-                power_data = api.plant_power_overview(_pid, selected_date)
-                powers = (power_data or {}).get("powers") or []
-                if powers:
-                    valid = [p for p in powers if p.get("power") is not None]
-                    if valid:
-                        p = valid[-1].get("power")
-                        current_power_w = _safe_numeric(p) if p is not None else None
-                        if current_power_w is not None and current_power_w < 0:
-                            current_power_w = None
+                devices = getattr(api, "device_list", lambda _: [])(_pid)
+                for dev in (devices or [])[:1]:
+                    sn = dev.get("deviceSn") or dev.get("serialNum") or dev.get("id")
+                    if sn:
+                        status = api.mix_system_status(sn, _pid) if hasattr(api, "mix_system_status") else {}
+                        ppv = status.get("ppv") or status.get("pPv1") or 0
+                        if ppv:
+                            current_power_w = _to_float(ppv) * 1000  # kW -> W
+                        break
             except Exception:
                 pass
-    except growattServer.GrowattV1ApiError as e:
-        sync_msg = "Inverter Syncing..."
-        st.sidebar.warning(f"Growatt: {getattr(e, 'error_msg', str(e))}. Re-login may help.")
     except Exception as e:
         sync_msg = "Inverter Syncing..."
         st.sidebar.warning(f"Growatt sync failed: {e}. Physics prediction shown.")
@@ -526,9 +537,8 @@ with tab_day:
         day_preds.append(0.0 if snow_override else day_pred)
         if _pid and api is not None:
             try:
-                h = api.plant_energy_history(_pid, ds, ds, "day", 1, 300)
-                el = (h or {}).get("energy_data") or (h or {}).get("dayPackage") or []
-                day_actuals.append(float(pd.to_numeric([_extract_energy(x) for x in el], errors="coerce").fillna(0).sum()) if isinstance(el, list) else 0.0)
+                day_actuals_list = _extract_legacy_energy_actuals(api, _pid, ds)
+                day_actuals.append(float(sum(day_actuals_list)) if day_actuals_list else 0.0)
             except Exception:
                 day_actuals.append(0.0)
         else:
