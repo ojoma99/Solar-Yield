@@ -350,30 +350,45 @@ st.markdown(
     unsafe_allow_html=True,
 )
 # --- Sidebar: Home Assistant connection (primary data source) ---
+INVERTER_ENTITY_OPTIONS = [
+    "sensor.growatt_actual_power",
+    "sensor.inverter_power",
+    "sensor.solar_power",
+    "sensor.pv_power",
+    "Custom...",
+]
 with st.sidebar:
     st.subheader("Home Assistant")
     ha_url = st.text_input(
         "HA URL",
-        value=st.session_state.get("ha_url", "http://192.168.1.1:8123"),
+        value=st.session_state.get("ha_url", "http://YOUR_HA_IP:8123"),
         key="ha_url",
-        placeholder="http://192.168.x.x:8123",
+        placeholder="http://YOUR_HA_IP:8123",
         help="Home Assistant instance URL.",
     )
     ha_token = st.text_input(
-        "Long-Lived Access Token",
+        "HA Token",
         type="password",
         value=st.session_state.get("ha_token", ""),
         key="ha_token",
-        help="Create under Profile → Long-Lived Access Tokens.",
+        help="Long-Lived Access Token (Profile → Long-Lived Access Tokens).",
     )
-    ha_power_entity = st.text_input(
-        "Power sensor entity",
-        value=st.session_state.get("ha_power_entity", "sensor.your_inverter_power"),
-        key="ha_power_entity",
-        placeholder="sensor.inverter_power",
-        help="e.g. sensor.inverter_power (Live Power + history for Hour view).",
+    entity_choice = st.selectbox(
+        "Inverter Entity ID",
+        options=INVERTER_ENTITY_OPTIONS,
+        index=0,
+        key="ha_entity_choice",
+        help="Power sensor for live data and history (e.g. sensor.growatt_actual_power).",
     )
-    # Widget keys (ha_url, ha_token, ha_power_entity) are owned by Streamlit; do not reassign.
+    if entity_choice == "Custom...":
+        ha_power_entity = st.text_input(
+            "Custom entity ID",
+            value=st.session_state.get("ha_power_entity", "sensor.inverter_power"),
+            key="ha_power_entity",
+            placeholder="sensor.my_inverter_power",
+        )
+    else:
+        ha_power_entity = entity_choice
 
 selected_date = st.sidebar.date_input("Analysis Date", datetime.now().date())
 cloud_cover_pct = st.sidebar.slider("Cloud cover (%)", 0, 100, 0, help="Prioritize diffuse radiation when high; improves cloudy/low-irradiance match.")
@@ -391,8 +406,9 @@ def _safe_numeric(val) -> float:
 # --- Fetch from Home Assistant: Live Power, Today's Energy, Total; Hour from history/period ---
 ha_url = (st.session_state.get("ha_url") or "").strip()
 ha_token = (st.session_state.get("ha_token") or "").strip()
-ha_entity = (st.session_state.get("ha_power_entity") or "sensor.your_inverter_power").strip()
-ha_configured = bool(ha_url and ha_token and ha_entity and "your_inverter" not in ha_entity.lower())
+_choice = st.session_state.get("ha_entity_choice", INVERTER_ENTITY_OPTIONS[0])
+ha_entity = (_choice if _choice != "Custom..." else (st.session_state.get("ha_power_entity") or "sensor.growatt_actual_power")).strip()
+ha_configured = bool(ha_url and ha_token and ha_entity and "YOUR_HA_IP" not in ha_url.upper())
 
 actuals = []
 live_kw_ha = None
@@ -425,14 +441,13 @@ if ha_configured:
             actuals = []
         if today_kwh_ha is None and actuals:
             today_kwh_ha = sum(actuals)
-    except Exception as e:
+    except Exception:
         st.session_state["ha_online"] = False
-        sync_msg = "HA error"
-        st.sidebar.warning(f"Home Assistant: {e}. Physics prediction only.")
+        sync_msg = "Connection failed"
     data_fetching = False
 
 if not ha_configured or not st.session_state.get("ha_online"):
-    st.info("**Home Assistant offline or not configured. Displaying Physics-Based Prediction Only.**")
+    st.warning("**Connection to HA failed. Check URL/Token.** 430Wp Physics Prediction remains visible so you can still see solar potential.")
 
 # Physics baseline: always compute prediction (430Wp / 80% bifacial)
 df = get_varel_prediction(d_str, cloud_cover)
