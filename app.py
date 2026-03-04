@@ -373,9 +373,7 @@ with st.sidebar:
         placeholder="sensor.inverter_power",
         help="e.g. sensor.inverter_power (Live Power + history for Hour view).",
     )
-    st.session_state["ha_url"] = ha_url
-    st.session_state["ha_token"] = ha_token
-    st.session_state["ha_power_entity"] = ha_power_entity or "sensor.your_inverter_power"
+    # Widget keys (ha_url, ha_token, ha_power_entity) are owned by Streamlit; do not reassign.
 
 selected_date = st.sidebar.date_input("Analysis Date", datetime.now().date())
 cloud_cover_pct = st.sidebar.slider("Cloud cover (%)", 0, 100, 0, help="Prioritize diffuse radiation when high; improves cloudy/low-irradiance match.")
