@@ -113,6 +113,23 @@ def ha_total_kwh_from_state(state: dict) -> float | None:
     return None
 
 
+def ha_energy_kwh_from_state(state: dict) -> float | None:
+    """Read an energy sensor state and normalize Wh/kWh to kWh."""
+    if not state or not isinstance(state, dict):
+        return None
+    raw = state.get("state")
+    if raw in (None, "", "unknown", "unavailable"):
+        return None
+    try:
+        val = float(str(raw).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+    unit = str((state.get("attributes") or {}).get("unit_of_measurement", "")).lower()
+    if unit == "wh":
+        return max(0.0, val / 1000.0)
+    return max(0.0, val)
+
+
 def _history_to_5min_kwh(history: list, date_str: str) -> list:
     """
     Convert HA history (list of state-change lists) for a power sensor into
@@ -199,6 +216,10 @@ PREDICTED_COLOR = "#39FF14"  # Electric Green (real-time & predicted)
 ACTUAL_COLOR = "#FFFF00"    # Neon Yellow
 
 st.set_page_config(page_title="Varel Solar Truth", layout="wide", page_icon="⚓")
+
+HA_POWER_ENTITY = "sensor.fsp0e3304v_system_power"
+HA_DAILY_ENTITY = "sensor.fsp0e3304v_system_production_today"
+HA_LIFETIME_ENTITY = "sensor.fsp0e3304v_lifetime_system_production"
 
 # Session state: Home Assistant (primary) and physics baseline
 if "ha_online" not in st.session_state:
@@ -350,13 +371,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 # --- Sidebar: Home Assistant connection (primary data source) ---
-INVERTER_ENTITY_OPTIONS = [
-    "sensor.growatt_actual_power",
-    "sensor.inverter_power",
-    "sensor.solar_power",
-    "sensor.pv_power",
-    "Custom...",
-]
 with st.sidebar:
     st.subheader("Home Assistant")
     ha_url = st.text_input(
@@ -373,22 +387,9 @@ with st.sidebar:
         key="ha_token",
         help="Long-Lived Access Token (Profile → Long-Lived Access Tokens).",
     )
-    entity_choice = st.selectbox(
-        "Inverter Entity ID",
-        options=INVERTER_ENTITY_OPTIONS,
-        index=0,
-        key="ha_entity_choice",
-        help="Power sensor for live data and history (e.g. sensor.growatt_actual_power).",
-    )
-    if entity_choice == "Custom...":
-        ha_power_entity = st.text_input(
-            "Custom entity ID",
-            value=st.session_state.get("ha_power_entity", "sensor.inverter_power"),
-            key="ha_power_entity",
-            placeholder="sensor.my_inverter_power",
-        )
-    else:
-        ha_power_entity = entity_choice
+    st.caption(f"Power: `{HA_POWER_ENTITY}`")
+    st.caption(f"Daily: `{HA_DAILY_ENTITY}`")
+    st.caption(f"Year history: `{HA_LIFETIME_ENTITY}`")
 
 selected_date = st.sidebar.date_input("Analysis Date", datetime.now().date())
 cloud_cover_pct = st.sidebar.slider("Cloud cover (%)", 0, 100, 0, help="Prioritize diffuse radiation when high; improves cloudy/low-irradiance match.")
@@ -424,9 +425,7 @@ def _hour_axis_ceiling_from_100w(*values_kwh_5min: float) -> float:
 # --- Fetch from Home Assistant: Live Power, Today's Energy, Total; Hour from history/period ---
 ha_url = (st.session_state.get("ha_url") or "").strip()
 ha_token = (st.session_state.get("ha_token") or "").strip()
-_choice = st.session_state.get("ha_entity_choice", INVERTER_ENTITY_OPTIONS[0])
-ha_entity = (_choice if _choice != "Custom..." else (st.session_state.get("ha_power_entity") or "sensor.growatt_actual_power")).strip()
-ha_configured = bool(ha_url and ha_token and ha_entity and "YOUR_HA_IP" not in ha_url.upper())
+ha_configured = bool(ha_url and ha_token and "YOUR_HA_IP" not in ha_url.upper())
 
 actuals = []
 live_kw_ha = None
@@ -439,21 +438,26 @@ data_fetching = False
 if ha_configured:
     data_fetching = True
     try:
-        state = ha_get_state(ha_url, ha_token, ha_entity)
-        if state:
-            live_kw_ha = ha_live_power_kw(state)
-            today_kwh_ha = ha_today_kwh_from_state(state)
-            total_kwh_ha = ha_total_kwh_from_state(state)
+        power_state = ha_get_state(ha_url, ha_token, HA_POWER_ENTITY)
+        daily_state = ha_get_state(ha_url, ha_token, HA_DAILY_ENTITY)
+        lifetime_state = ha_get_state(ha_url, ha_token, HA_LIFETIME_ENTITY)
+        if power_state:
+            live_kw_ha = ha_live_power_kw(power_state)
+        if daily_state:
+            today_kwh_ha = ha_energy_kwh_from_state(daily_state)
+        if lifetime_state:
+            total_kwh_ha = ha_energy_kwh_from_state(lifetime_state)
+        if power_state or daily_state or lifetime_state:
             st.session_state["ha_online"] = True
             sync_msg = "🟢 Online"
             last_sync = datetime.now().strftime("%H:%M:%S")
         else:
             st.session_state["ha_online"] = False
-            sync_msg = "HA unreachable"
+            sync_msg = "FSP Link Offline"
         # Hour tab: history for selected date → 5-min kWh buckets
         start_iso = f"{d_str}T00:00:00"
         end_iso = f"{d_str}T23:59:59"
-        history = ha_get_history(ha_url, ha_token, ha_entity, start_iso, end_iso)
+        history = ha_get_history(ha_url, ha_token, HA_POWER_ENTITY, start_iso, end_iso)
         actuals = _history_to_5min_kwh(history, d_str)
         if not actuals:
             actuals = []
@@ -461,11 +465,11 @@ if ha_configured:
             today_kwh_ha = sum(actuals)
     except Exception:
         st.session_state["ha_online"] = False
-        sync_msg = "Connection failed"
+        sync_msg = "FSP Link Offline"
     data_fetching = False
 
 if not ha_configured or not st.session_state.get("ha_online"):
-    st.warning("**Connection to HA failed. Check URL/Token.** 430Wp Physics Prediction remains visible so you can still see solar potential.")
+    st.warning("FSP Link Offline. Displaying Physics Only.")
 
 # Physics baseline: always compute prediction (430Wp / 80% bifacial)
 df = get_varel_prediction(d_str, cloud_cover)
@@ -516,13 +520,20 @@ daily_display = fetch_label or (f"{daily_actual_kwh:.1f}" if daily_actual_kwh is
 pred_live_display = fetch_label or f"{pred_live_kw:.2f}"
 pred_daily_display = fetch_label or f"{pred_total_kwh:.1f}"
 
-actual_c1, actual_c2 = st.columns(2)
-actual_c1.metric("Live kW", live_display)
-actual_c2.metric("Daily kWh", daily_display)
-
-pred_c1, pred_c2 = st.columns(2)
-pred_c1.metric("Pred Live", pred_live_display)
-pred_c2.metric("Pred Daily", pred_daily_display)
+# Portrait fix: force one-row HUD with 4 equal columns.
+st.markdown(
+    """
+    <style>
+    div[data-testid="column"] {width: 25% !important; flex: 1 1 25% !important; min-width: 25% !important; text-align: center; font-size: 0.8em;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Live kW", live_display)
+m2.metric("Pred Live", pred_live_display)
+m3.metric("Daily kWh", daily_display)
+m4.metric("Pred Daily", pred_daily_display)
 
 # Snow-Locked flag for February when Snow Override is ON
 if snow_override and selected_date.month == 2:
@@ -555,26 +566,28 @@ with tab_hour:
 
     # Predicted: Electric Green #39FF14 (430Wp / 80% Bifacial)
     fig.add_trace(
-        go.Bar(
+        go.Scatter(
             x=df["Time"],
             y=df["Predicted"],
+            mode="lines",
             name="Predicted",
             customdata=df["Cloud_Cover"],
             hovertemplate="Predicted: %{y:.2f} kWh<br>Cloud: %{customdata:.0f}%%<extra></extra>",
-            marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)),
-            opacity=0.5,
+            line=dict(color=PREDICTED_COLOR, width=2),
+            opacity=0.9,
         )
     )
     if actuals:
         fig.add_trace(
-            go.Bar(
+            go.Scatter(
                 x=df["Time"],
                 y=df["Actual"],
+                mode="lines",
                 name="Actual (HA)",
                 customdata=df["Cloud_Cover"],
                 hovertemplate="Actual: %{y:.2f} kWh<br>Cloud: %{customdata:.0f}%%<extra></extra>",
-                marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)),
-                opacity=0.8,
+                line=dict(color=ACTUAL_COLOR, width=2),
+                opacity=0.95,
             )
         )
     fig.update_xaxes(
@@ -606,7 +619,6 @@ with tab_hour:
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color="#e0e0e0"),
-        barmode="overlay",
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.5, xanchor="center", bordercolor="rgba(0,0,0,0)", borderwidth=0),
         xaxis=dict(
@@ -649,6 +661,30 @@ def _ha_month_total_kwh(base_url: str, token: str, entity_id: str, year: int, mo
     return total
 
 
+def _ha_year_total_from_lifetime(base_url: str, token: str, entity_id: str, year: int) -> float:
+    """Compute one year's production from lifetime total sensor by delta(last-first)."""
+    start_iso = f"{year}-01-01T00:00:00"
+    end_iso = f"{year}-12-31T23:59:59"
+    hist = ha_get_history(base_url, token, entity_id, start_iso, end_iso)
+    values: list[float] = []
+    for chunk in (hist or []):
+        if not isinstance(chunk, list):
+            continue
+        for ev in chunk:
+            if not isinstance(ev, dict):
+                continue
+            raw = ev.get("state")
+            if raw in (None, "", "unknown", "unavailable"):
+                continue
+            try:
+                values.append(float(str(raw).replace(",", ".")))
+            except (TypeError, ValueError):
+                continue
+    if len(values) < 2:
+        return 0.0
+    return max(0.0, values[-1] - values[0])
+
+
 # ---------- DAY TAB: Last 7 days aggregate (HA actuals vs 430Wp physics) ----------
 with tab_day:
     day_dates = [selected_date - timedelta(days=i) for i in range(6, -1, -1)]
@@ -660,7 +696,7 @@ with tab_day:
         day_pred = float(pd.to_numeric(pdf["Predicted"], errors="coerce").fillna(0).sum())
         day_preds.append(0.0 if snow_override else day_pred)
         if ha_configured:
-            day_actuals.append(_ha_day_total_kwh(ha_url, ha_token, ha_entity, ds))
+            day_actuals.append(_ha_day_total_kwh(ha_url, ha_token, HA_POWER_ENTITY, ds))
         else:
             day_actuals.append(0.0)
     day_actuals = [float(_safe_numeric(x)) for x in day_actuals]
@@ -699,7 +735,7 @@ with tab_month:
         else:
             month_preds.append(0.0)
         if ha_configured:
-            month_actuals.append(_ha_month_total_kwh(ha_url, ha_token, ha_entity, y, m))
+            month_actuals.append(_ha_month_total_kwh(ha_url, ha_token, HA_POWER_ENTITY, y, m))
         else:
             month_actuals.append(0.0)
         m -= 1
@@ -735,12 +771,7 @@ with tab_year:
     year_preds = [0.0, 0.0, 0.0]
     if ha_configured:
         for i, yr in enumerate([now.year - 2, now.year - 1, now.year]):
-            for mo in range(1, 13):
-                year_actuals[i] += _ha_month_total_kwh(ha_url, ha_token, ha_entity, yr, mo)
-        if now.year in [now.year - 2, now.year - 1, now.year]:
-            idx = [now.year - 2, now.year - 1, now.year].index(now.year)
-            if daily_actual_kwh is not None:
-                year_actuals[idx] = max(year_actuals[idx], daily_actual_kwh)
+            year_actuals[i] = _ha_year_total_from_lifetime(ha_url, ha_token, HA_LIFETIME_ENTITY, yr)
     else:
         year_actuals[2] = 0.0
     year_preds[2] = 0.0 if snow_override else (pred_total_kwh if selected_date.year == now.year else 0.0)
