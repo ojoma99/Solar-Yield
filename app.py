@@ -405,11 +405,21 @@ def _safe_numeric(val) -> float:
 
 
 def _dynamic_axis_ceiling(*values: float) -> float:
-    """Chart y-axis ceiling that follows data closely on mobile."""
+    """Generic chart y-axis ceiling with modest headroom."""
     peak = max((_safe_numeric(v) for v in values), default=0.0)
     if peak <= 0:
         return 1.0
     return float(peak * 1.2)
+
+
+def _hour_axis_ceiling_from_100w(*values_kwh_5min: float) -> float:
+    """
+    Hour-tab axis ceiling = max(5-min kWh bars) + 100W-equivalent headroom.
+    100W over 5 minutes = (100/1000) kW * (5/60) h = 0.008333... kWh.
+    """
+    peak = max((_safe_numeric(v) for v in values_kwh_5min), default=0.0)
+    headroom_kwh = (100.0 / 1000.0) * (5.0 / 60.0)
+    return float(max(0.05, peak + headroom_kwh))
 
 # --- Fetch from Home Assistant: Live Power, Today's Energy, Total; Hour from history/period ---
 ha_url = (st.session_state.get("ha_url") or "").strip()
@@ -580,7 +590,7 @@ with tab_hour:
     )
     pred_max = float(pd.to_numeric(df["Predicted"], errors="coerce").fillna(0).max())
     actual_max = float(pd.to_numeric(df["Actual"], errors="coerce").fillna(0).max()) if "Actual" in df.columns else 0.0
-    max_yield = _dynamic_axis_ceiling(pred_max, actual_max)
+    max_yield = _hour_axis_ceiling_from_100w(pred_max, actual_max)
     fig.update_yaxes(
         range=[0, max_yield],
         fixedrange=True,
