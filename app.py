@@ -403,6 +403,14 @@ def _safe_numeric(val) -> float:
     s = pd.Series([val])
     return float(pd.to_numeric(s, errors="coerce").fillna(0).iloc[0])
 
+
+def _dynamic_axis_ceiling(*values: float) -> float:
+    """Chart y-axis ceiling that follows data closely on mobile."""
+    peak = max((_safe_numeric(v) for v in values), default=0.0)
+    if peak <= 0:
+        return 1.0
+    return float(peak * 1.2)
+
 # --- Fetch from Home Assistant: Live Power, Today's Energy, Total; Hour from history/period ---
 ha_url = (st.session_state.get("ha_url") or "").strip()
 ha_token = (st.session_state.get("ha_token") or "").strip()
@@ -482,34 +490,29 @@ else:
 # Physics baseline: when HA has no/small actuals, keep full 430Wp prediction (no 0.15 shrink)
 total_pre = float(df["Predicted"].sum())
 
-# HUD: Live = HA live power or physics; Daily = HA today/sum(actuals) or physics
+# HUD: keep HA "actual" metrics separate from physics predictions.
 total_pre_num = _safe_numeric(total_pre)
-current_kw = live_kw_ha if live_kw_ha is not None else realtime_kw
-current_kw = _safe_numeric(current_kw)
-daily_total_kwh = today_kwh_ha if today_kwh_ha is not None else (_safe_numeric(sum(actuals)) if actuals else total_pre_num)
-daily_total_kwh = _safe_numeric(daily_total_kwh)
-if daily_total_kwh < 0:
-    daily_total_kwh = total_pre_num
-system_health_pct = (daily_total_kwh / total_pre_num * 100) if total_pre_num > 0 and actuals else (_safe_numeric(current_kw) / SYSTEM_KWP * 100) if current_kw else 0.0
-system_health_pct = _safe_numeric(system_health_pct)
+live_actual_kw = _safe_numeric(live_kw_ha) if live_kw_ha is not None else None
+daily_actual_kwh = _safe_numeric(today_kwh_ha) if today_kwh_ha is not None else (_safe_numeric(sum(actuals)) if actuals else None)
+if daily_actual_kwh is not None and daily_actual_kwh < 0:
+    daily_actual_kwh = 0.0
 
-# High-density layout: force 4 metrics into one row (width: 25% !important)
-st.markdown(
-    """
-    <style>
-    div[data-testid="column"] { width: 25% !important; flex: 1 1 25% !important; min-width: 25% !important; text-align: center; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 pred_live_kw = 0.0 if snow_override else _safe_numeric(realtime_kw)  # 430Wp / 80% bifacial; 0 when Snow Override
 pred_total_kwh = total_pre_num  # full-day integration; 0 when Snow Override
 fetch_label = "fetching..." if data_fetching else ""
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Live kW", fetch_label or f"{current_kw:.2f}")
-m2.metric("Pred Live", fetch_label or f"{pred_live_kw:.2f}")
-m3.metric("Daily kWh", fetch_label or f"{daily_total_kwh:.1f}")
-m4.metric("Pred Daily", fetch_label or f"{pred_total_kwh:.1f}")
+
+live_display = fetch_label or (f"{live_actual_kw:.2f}" if live_actual_kw is not None else "N/A")
+daily_display = fetch_label or (f"{daily_actual_kwh:.1f}" if daily_actual_kwh is not None else "N/A")
+pred_live_display = fetch_label or f"{pred_live_kw:.2f}"
+pred_daily_display = fetch_label or f"{pred_total_kwh:.1f}"
+
+actual_c1, actual_c2 = st.columns(2)
+actual_c1.metric("Live kW", live_display)
+actual_c2.metric("Daily kWh", daily_display)
+
+pred_c1, pred_c2 = st.columns(2)
+pred_c1.metric("Pred Live", pred_live_display)
+pred_c2.metric("Pred Daily", pred_daily_display)
 
 # Snow-Locked flag for February when Snow Override is ON
 if snow_override and selected_date.month == 2:
@@ -577,7 +580,7 @@ with tab_hour:
     )
     pred_max = float(pd.to_numeric(df["Predicted"], errors="coerce").fillna(0).max())
     actual_max = float(pd.to_numeric(df["Actual"], errors="coerce").fillna(0).max()) if "Actual" in df.columns else 0.0
-    max_yield = max(7.5, pred_max, actual_max, 0.01)
+    max_yield = _dynamic_axis_ceiling(pred_max, actual_max)
     fig.update_yaxes(
         range=[0, max_yield],
         fixedrange=True,
@@ -588,7 +591,7 @@ with tab_hour:
     )
     fig.update_layout(
         margin=dict(l=48, r=0, t=40, b=0),
-        height=400,
+        height=520,
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
@@ -655,7 +658,7 @@ with tab_day:
     fig_day = go.Figure()
     fig_day.add_trace(go.Bar(x=[d.strftime("%a %d") for d in day_dates], y=day_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
     fig_day.add_trace(go.Bar(x=[d.strftime("%a %d") for d in day_dates], y=day_actuals, name="Actual (HA)", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
-    max_yield = max(7.5, max(day_actuals or [0]), max(day_preds or [0]), 0.01)
+    max_yield = _dynamic_axis_ceiling(max(day_actuals or [0.0]), max(day_preds or [0.0]))
     fig_day.update_yaxes(range=[0, max_yield], fixedrange=True, nticks=4, title_text="Yield (kWh)")
     fig_day.update_layout(
         template="plotly_dark",
@@ -688,7 +691,7 @@ with tab_month:
         if ha_configured:
             month_actuals.append(_ha_month_total_kwh(ha_url, ha_token, ha_entity, y, m))
         else:
-            month_actuals.append(daily_total_kwh if (y == now.year and m == now.month) else 0.0)
+            month_actuals.append(0.0)
         m -= 1
         if m < 1:
             m, y = 12, y - 1
@@ -698,7 +701,7 @@ with tab_month:
     fig_month = go.Figure()
     fig_month.add_trace(go.Bar(x=month_labels, y=month_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
     fig_month.add_trace(go.Bar(x=month_labels, y=month_actuals, name="Actual (HA)", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
-    max_yield = max(7.5, max(month_actuals or [0]), max(month_preds or [0]), 0.01)
+    max_yield = _dynamic_axis_ceiling(max(month_actuals or [0.0]), max(month_preds or [0.0]))
     fig_month.update_yaxes(range=[0, max_yield], fixedrange=True, nticks=4, title_text="Yield (kWh)")
     fig_month.update_layout(
         template="plotly_dark",
@@ -726,14 +729,15 @@ with tab_year:
                 year_actuals[i] += _ha_month_total_kwh(ha_url, ha_token, ha_entity, yr, mo)
         if now.year in [now.year - 2, now.year - 1, now.year]:
             idx = [now.year - 2, now.year - 1, now.year].index(now.year)
-            year_actuals[idx] = max(year_actuals[idx], daily_total_kwh)
+            if daily_actual_kwh is not None:
+                year_actuals[idx] = max(year_actuals[idx], daily_actual_kwh)
     else:
-        year_actuals[2] = daily_total_kwh if selected_date.year == now.year else 0.0
+        year_actuals[2] = 0.0
     year_preds[2] = 0.0 if snow_override else (pred_total_kwh if selected_date.year == now.year else 0.0)
     fig_year = go.Figure()
     fig_year.add_trace(go.Bar(x=year_labels, y=year_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
     fig_year.add_trace(go.Bar(x=year_labels, y=year_actuals, name="Actual (HA)", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
-    max_yield = max(7.5, max(year_actuals or [0]), max(year_preds or [0]), 0.01)
+    max_yield = _dynamic_axis_ceiling(max(year_actuals or [0.0]), max(year_preds or [0.0]))
     fig_year.update_yaxes(range=[0, max_yield], fixedrange=True, nticks=4, title_text="Yield (kWh)")
     fig_year.update_layout(
         template="plotly_dark",
