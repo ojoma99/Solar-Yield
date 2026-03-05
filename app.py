@@ -21,6 +21,14 @@ pio.templates.default = "plotly_dark"
 LAT, LON = 53.396, 8.136
 LAT_RAD = math.radians(LAT)
 
+# --- Home Assistant: token from Streamlit secrets (HA_TOKEN) or env; optional local fallback below ---
+HA_TOKEN = ""  # optional: paste here for local run only; use Streamlit Cloud Secrets in production
+
+# FSP-HA sensor IDs for Abamu residence
+HA_POWER_ENTITY_DEFAULT = "sensor.fsp0e3304v_system_power"
+HA_TODAY_ENTITY = "sensor.fsp0e3304v_system_production_today"
+HA_LIFETIME_ENTITY = "sensor.fsp0e3304v_lifetime_system_production"
+
 
 def _to_float(val) -> float:
     """Coerce value to float; return 0.0 on failure."""
@@ -204,8 +212,8 @@ st.set_page_config(page_title="Varel Solar Truth", layout="wide", page_icon="⚓
 if "ha_online" not in st.session_state:
     st.session_state["ha_online"] = False
 
-# Auto-refresh every 10 minutes to avoid hitting Growatt rate limits
-st_autorefresh_ms = 10 * 60 * 1000
+# Auto-refresh every 30 seconds for near real-time monitoring
+st_autorefresh_ms = 30 * 1000
 try:
     # Only import if available; avoid hard dependency breakage
     from streamlit_autorefresh import st_autorefresh
@@ -351,7 +359,7 @@ st.markdown(
 )
 # --- Sidebar: Home Assistant connection (primary data source) ---
 INVERTER_ENTITY_OPTIONS = [
-    "sensor.growatt_actual_power",
+    HA_POWER_ENTITY_DEFAULT,
     "sensor.inverter_power",
     "sensor.solar_power",
     "sensor.pv_power",
@@ -365,13 +373,6 @@ with st.sidebar:
         key="ha_url",
         placeholder="http://YOUR_HA_IP:8123",
         help="Home Assistant instance URL.",
-    )
-    ha_token = st.text_input(
-        "HA Token",
-        type="password",
-        value=st.session_state.get("ha_token", ""),
-        key="ha_token",
-        help="Long-Lived Access Token (Profile → Long-Lived Access Tokens).",
     )
     entity_choice = st.selectbox(
         "Inverter Entity ID",
@@ -405,9 +406,13 @@ def _safe_numeric(val) -> float:
 
 # --- Fetch from Home Assistant: Live Power, Today's Energy, Total; Hour from history/period ---
 ha_url = (st.session_state.get("ha_url") or "").strip()
-ha_token = (st.session_state.get("ha_token") or "").strip()
+try:
+    _token = st.secrets.get("HA_TOKEN", "")
+except Exception:
+    _token = ""
+ha_token = (_token or HA_TOKEN or os.environ.get("HA_TOKEN") or "").strip()
 _choice = st.session_state.get("ha_entity_choice", INVERTER_ENTITY_OPTIONS[0])
-ha_entity = (_choice if _choice != "Custom..." else (st.session_state.get("ha_power_entity") or "sensor.growatt_actual_power")).strip()
+ha_entity = (_choice if _choice != "Custom..." else (st.session_state.get("ha_power_entity") or HA_POWER_ENTITY_DEFAULT)).strip()
 ha_configured = bool(ha_url and ha_token and ha_entity and "YOUR_HA_IP" not in ha_url.upper())
 
 actuals = []
@@ -421,18 +426,28 @@ data_fetching = False
 if ha_configured:
     data_fetching = True
     try:
-        state = ha_get_state(ha_url, ha_token, ha_entity)
-        if state:
-            live_kw_ha = ha_live_power_kw(state)
-            today_kwh_ha = ha_today_kwh_from_state(state)
-            total_kwh_ha = ha_total_kwh_from_state(state)
+        # Live power
+        power_state = ha_get_state(ha_url, ha_token, ha_entity)
+        if power_state:
+            live_kw_ha = ha_live_power_kw(power_state)
             st.session_state["ha_online"] = True
             sync_msg = "🟢 Online"
             last_sync = datetime.now().strftime("%H:%M:%S")
         else:
             st.session_state["ha_online"] = False
             sync_msg = "HA unreachable"
-        # Hour tab: history for selected date → 5-min kWh buckets
+
+        # Today's energy (kWh)
+        today_state = ha_get_state(ha_url, ha_token, HA_TODAY_ENTITY)
+        if today_state:
+            today_kwh_ha = _to_float(today_state.get("state"))
+
+        # Lifetime production (kWh)
+        lifetime_state = ha_get_state(ha_url, ha_token, HA_LIFETIME_ENTITY)
+        if lifetime_state:
+            total_kwh_ha = _to_float(lifetime_state.get("state"))
+
+        # Hour tab: history for selected date → 5-min kWh buckets using power sensor
         start_iso = f"{d_str}T00:00:00"
         end_iso = f"{d_str}T23:59:59"
         history = ha_get_history(ha_url, ha_token, ha_entity, start_iso, end_iso)
@@ -497,7 +512,7 @@ system_health_pct = _safe_numeric(system_health_pct)
 st.markdown(
     """
     <style>
-    div[data-testid="column"] { width: 25% !important; flex: 1 1 25% !important; min-width: 25% !important; text-align: center; }
+    div[data-testid="column"] { width: 25% !important; flex: 1 1 25% !important; min-width: 25% !important; text-align: center; border-right: 1px solid #333; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -577,7 +592,7 @@ with tab_hour:
     )
     pred_max = float(pd.to_numeric(df["Predicted"], errors="coerce").fillna(0).max())
     actual_max = float(pd.to_numeric(df["Actual"], errors="coerce").fillna(0).max()) if "Actual" in df.columns else 0.0
-    max_yield = max(7.5, pred_max, actual_max, 0.01)
+    max_yield = max(pred_max, actual_max, 0.01)
     fig.update_yaxes(
         range=[0, max_yield],
         fixedrange=True,
@@ -655,7 +670,7 @@ with tab_day:
     fig_day = go.Figure()
     fig_day.add_trace(go.Bar(x=[d.strftime("%a %d") for d in day_dates], y=day_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
     fig_day.add_trace(go.Bar(x=[d.strftime("%a %d") for d in day_dates], y=day_actuals, name="Actual (HA)", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
-    max_yield = max(7.5, max(day_actuals or [0]), max(day_preds or [0]), 0.01)
+    max_yield = max(max(day_actuals or [0]), max(day_preds or [0]), 0.01)
     fig_day.update_yaxes(range=[0, max_yield], fixedrange=True, nticks=4, title_text="Yield (kWh)")
     fig_day.update_layout(
         template="plotly_dark",
@@ -698,7 +713,7 @@ with tab_month:
     fig_month = go.Figure()
     fig_month.add_trace(go.Bar(x=month_labels, y=month_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
     fig_month.add_trace(go.Bar(x=month_labels, y=month_actuals, name="Actual (HA)", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
-    max_yield = max(7.5, max(month_actuals or [0]), max(month_preds or [0]), 0.01)
+    max_yield = max(max(month_actuals or [0]), max(month_preds or [0]), 0.01)
     fig_month.update_yaxes(range=[0, max_yield], fixedrange=True, nticks=4, title_text="Yield (kWh)")
     fig_month.update_layout(
         template="plotly_dark",
@@ -733,7 +748,7 @@ with tab_year:
     fig_year = go.Figure()
     fig_year.add_trace(go.Bar(x=year_labels, y=year_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
     fig_year.add_trace(go.Bar(x=year_labels, y=year_actuals, name="Actual (HA)", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
-    max_yield = max(7.5, max(year_actuals or [0]), max(year_preds or [0]), 0.01)
+    max_yield = max(max(year_actuals or [0]), max(year_preds or [0]), 0.01)
     fig_year.update_yaxes(range=[0, max_yield], fixedrange=True, nticks=4, title_text="Yield (kWh)")
     fig_year.update_layout(
         template="plotly_dark",
