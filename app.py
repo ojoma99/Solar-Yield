@@ -20,6 +20,9 @@ pio.templates.default = "plotly_dark"
 # --- SYSTEM CONFIG (Varel: 53.396°N, 8.136°E) ---
 LAT, LON = 53.396, 8.136
 LAT_RAD = math.radians(LAT)
+FSP_LIVE_POWER_ENTITY = "sensor.fsp0e3304v_total_output_power"
+FSP_DAILY_YIELD_ENTITY = "sensor.fsp0e3304v_total_wattage"
+FSP_LIFETIME_ENTITY = "sensor.fsp0e3304v_total_lifetime_energy"
 
 
 def _to_float(val) -> float:
@@ -37,6 +40,7 @@ def _ha_headers(token: str) -> dict:
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
+@st.cache_data(ttl=15, show_spinner=False)
 def ha_get_state(base_url: str, token: str, entity_id: str):
     """GET /api/states/<entity_id>. Returns dict with state, attributes, or None on error."""
     url = urljoin(base_url.rstrip("/") + "/", f"api/states/{entity_id}")
@@ -48,6 +52,7 @@ def ha_get_state(base_url: str, token: str, entity_id: str):
         return None
 
 
+@st.cache_data(ttl=120, show_spinner=False)
 def ha_get_history(base_url: str, token: str, entity_id: str, start_iso: str, end_iso: str):
     """GET /api/history/period with filter_entity_id. Returns list of state-change lists or []."""
     base = base_url.rstrip("/") + "/"
@@ -83,16 +88,37 @@ def ha_live_power_kw(state: dict) -> float:
     return max(0.0, val / 1000.0)
 
 
+def ha_energy_kwh_from_state(state: dict) -> float | None:
+    """Extract energy from state and normalize to kWh."""
+    if not state or not isinstance(state, dict):
+        return None
+    raw = state.get("state")
+    if raw in (None, "", "unknown", "unavailable"):
+        return None
+    try:
+        val = float(str(raw).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+    unit = str((state.get("attributes") or {}).get("unit_of_measurement", "")).strip().lower()
+    if "mwh" in unit:
+        return max(0.0, val * 1000.0)
+    if "kwh" in unit:
+        return max(0.0, val)
+    if "wh" in unit:
+        return max(0.0, val / 1000.0)
+    return max(0.0, val)
+
+
 def ha_today_kwh_from_state(state: dict) -> float | None:
     """Extract today's energy (kWh) from state attributes if present."""
     if not state or not isinstance(state, dict):
         return None
     attrs = state.get("attributes") or {}
-    for key in ("today", "today_energy", "energy_today", "daily_energy", "state_class"):
+    for key in ("today", "today_energy", "energy_today", "daily_energy"):
         v = attrs.get(key)
         if v is not None and isinstance(v, (int, float)):
             return float(v)
-    return None
+    return ha_energy_kwh_from_state(state)
 
 
 def ha_total_kwh_from_state(state: dict) -> float | None:
@@ -104,13 +130,7 @@ def ha_total_kwh_from_state(state: dict) -> float | None:
         v = attrs.get(key)
         if v is not None and isinstance(v, (int, float)):
             return float(v)
-    raw = state.get("state")
-    if raw not in (None, "", "unknown", "unavailable"):
-        try:
-            return float(str(raw).replace(",", "."))
-        except (TypeError, ValueError):
-            pass
-    return None
+    return ha_energy_kwh_from_state(state)
 
 
 def _history_to_5min_kwh(history: list, date_str: str) -> list:
@@ -350,15 +370,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 # --- Sidebar: Home Assistant connection (primary data source) ---
-INVERTER_ENTITY_OPTIONS = [
-    "sensor.growatt_actual_power",
-    "sensor.inverter_power",
-    "sensor.solar_power",
-    "sensor.pv_power",
-    "Custom...",
-]
 with st.sidebar:
-    st.subheader("Home Assistant")
+    st.subheader("FSP-HA Bridge")
     ha_url = st.text_input(
         "HA URL",
         value=st.session_state.get("ha_url", "http://YOUR_HA_IP:8123"),
@@ -373,22 +386,9 @@ with st.sidebar:
         key="ha_token",
         help="Long-Lived Access Token (Profile → Long-Lived Access Tokens).",
     )
-    entity_choice = st.selectbox(
-        "Inverter Entity ID",
-        options=INVERTER_ENTITY_OPTIONS,
-        index=0,
-        key="ha_entity_choice",
-        help="Power sensor for live data and history (e.g. sensor.growatt_actual_power).",
-    )
-    if entity_choice == "Custom...":
-        ha_power_entity = st.text_input(
-            "Custom entity ID",
-            value=st.session_state.get("ha_power_entity", "sensor.inverter_power"),
-            key="ha_power_entity",
-            placeholder="sensor.my_inverter_power",
-        )
-    else:
-        ha_power_entity = entity_choice
+    st.caption(f"Live Power: `{FSP_LIVE_POWER_ENTITY}`")
+    st.caption(f"Daily Yield: `{FSP_DAILY_YIELD_ENTITY}`")
+    st.caption(f"Lifetime: `{FSP_LIFETIME_ENTITY}`")
 
 selected_date = st.sidebar.date_input("Analysis Date", datetime.now().date())
 cloud_cover_pct = st.sidebar.slider("Cloud cover (%)", 0, 100, 0, help="Prioritize diffuse radiation when high; improves cloudy/low-irradiance match.")
@@ -406,9 +406,7 @@ def _safe_numeric(val) -> float:
 # --- Fetch from Home Assistant: Live Power, Today's Energy, Total; Hour from history/period ---
 ha_url = (st.session_state.get("ha_url") or "").strip()
 ha_token = (st.session_state.get("ha_token") or "").strip()
-_choice = st.session_state.get("ha_entity_choice", INVERTER_ENTITY_OPTIONS[0])
-ha_entity = (_choice if _choice != "Custom..." else (st.session_state.get("ha_power_entity") or "sensor.growatt_actual_power")).strip()
-ha_configured = bool(ha_url and ha_token and ha_entity and "YOUR_HA_IP" not in ha_url.upper())
+ha_configured = bool(ha_url and ha_token and "YOUR_HA_IP" not in ha_url.upper())
 
 actuals = []
 live_kw_ha = None
@@ -421,33 +419,40 @@ data_fetching = False
 if ha_configured:
     data_fetching = True
     try:
-        state = ha_get_state(ha_url, ha_token, ha_entity)
-        if state:
-            live_kw_ha = ha_live_power_kw(state)
-            today_kwh_ha = ha_today_kwh_from_state(state)
-            total_kwh_ha = ha_total_kwh_from_state(state)
-            st.session_state["ha_online"] = True
-            sync_msg = "🟢 Online"
-            last_sync = datetime.now().strftime("%H:%M:%S")
-        else:
-            st.session_state["ha_online"] = False
-            sync_msg = "HA unreachable"
+        live_state = ha_get_state(ha_url, ha_token, FSP_LIVE_POWER_ENTITY)
+        daily_state = ha_get_state(ha_url, ha_token, FSP_DAILY_YIELD_ENTITY)
+        lifetime_state = ha_get_state(ha_url, ha_token, FSP_LIFETIME_ENTITY)
+
+        live_kw_ha = ha_live_power_kw(live_state)
+        today_kwh_ha = ha_energy_kwh_from_state(daily_state)
+        total_kwh_ha = ha_energy_kwh_from_state(lifetime_state)
+        if today_kwh_ha is None:
+            today_kwh_ha = ha_today_kwh_from_state(live_state)
+        if total_kwh_ha is None:
+            total_kwh_ha = ha_total_kwh_from_state(live_state)
+
         # Hour tab: history for selected date → 5-min kWh buckets
         start_iso = f"{d_str}T00:00:00"
         end_iso = f"{d_str}T23:59:59"
-        history = ha_get_history(ha_url, ha_token, ha_entity, start_iso, end_iso)
+        history = ha_get_history(ha_url, ha_token, FSP_LIVE_POWER_ENTITY, start_iso, end_iso)
         actuals = _history_to_5min_kwh(history, d_str)
         if not actuals:
             actuals = []
         if today_kwh_ha is None and actuals:
             today_kwh_ha = sum(actuals)
+        st.session_state["ha_online"] = bool(live_state or daily_state or lifetime_state or actuals)
+        sync_msg = "🟢 Online" if st.session_state["ha_online"] else "Offline"
+        if st.session_state["ha_online"]:
+            last_sync = datetime.now().strftime("%H:%M:%S")
     except Exception:
         st.session_state["ha_online"] = False
-        sync_msg = "Connection failed"
+        sync_msg = "Offline"
     data_fetching = False
 
-if not ha_configured or not st.session_state.get("ha_online"):
-    st.warning("**Connection to HA failed. Check URL/Token.** 430Wp Physics Prediction remains visible so you can still see solar potential.")
+if ha_configured and not st.session_state.get("ha_online"):
+    st.warning("FSP Sensors Offline. Using Physics Fallback.")
+elif not ha_configured:
+    st.info("Enter HA URL and token to connect FSP sensors.")
 
 # Physics baseline: always compute prediction (430Wp / 80% bifacial)
 df = get_varel_prediction(d_str, cloud_cover)
@@ -506,10 +511,10 @@ pred_live_kw = 0.0 if snow_override else _safe_numeric(realtime_kw)  # 430Wp / 8
 pred_total_kwh = total_pre_num  # full-day integration; 0 when Snow Override
 fetch_label = "fetching..." if data_fetching else ""
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Live kW", fetch_label or f"{current_kw:.2f}")
-m2.metric("Pred Live", fetch_label or f"{pred_live_kw:.2f}")
-m3.metric("Daily kWh", fetch_label or f"{daily_total_kwh:.1f}")
-m4.metric("Pred Daily", fetch_label or f"{pred_total_kwh:.1f}")
+m1.metric("Live", fetch_label or f"{current_kw:.2f} kW")
+m2.metric("Pred Live", fetch_label or f"{pred_live_kw:.2f} kW")
+m3.metric("Daily", fetch_label or f"{daily_total_kwh:.1f} kWh")
+m4.metric("Pred Daily", fetch_label or f"{pred_total_kwh:.1f} kWh")
 
 # Snow-Locked flag for February when Snow Override is ON
 if snow_override and selected_date.month == 2:
@@ -557,7 +562,7 @@ with tab_hour:
             go.Bar(
                 x=df["Time"],
                 y=df["Actual"],
-                name="Actual (HA)",
+                name="Actual (FSP)",
                 customdata=df["Cloud_Cover"],
                 hovertemplate="Actual: %{y:.2f} kWh<br>Cloud: %{customdata:.0f}%%<extra></extra>",
                 marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)),
@@ -577,7 +582,7 @@ with tab_hour:
     )
     pred_max = float(pd.to_numeric(df["Predicted"], errors="coerce").fillna(0).max())
     actual_max = float(pd.to_numeric(df["Actual"], errors="coerce").fillna(0).max()) if "Actual" in df.columns else 0.0
-    max_yield = max(7.5, pred_max, actual_max, 0.01)
+    max_yield = max(pred_max, actual_max, 0.01)
     fig.update_yaxes(
         range=[0, max_yield],
         fixedrange=True,
@@ -616,6 +621,7 @@ with tab_hour:
         st.plotly_chart(fig, use_container_width=True, key="abamu_solar_chart", config={"scrollZoom": True, "displayModeBar": False})
     st.markdown("</div>", unsafe_allow_html=True)
 
+@st.cache_data(ttl=900, show_spinner=False)
 def _ha_day_total_kwh(base_url: str, token: str, entity_id: str, date_str: str) -> float:
     """Sum 5-min kWh for one day from HA history (for Day/Month/Year tabs)."""
     start_iso = f"{date_str}T00:00:00"
@@ -625,6 +631,7 @@ def _ha_day_total_kwh(base_url: str, token: str, entity_id: str, date_str: str) 
     return float(sum(slots)) if slots else 0.0
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def _ha_month_total_kwh(base_url: str, token: str, entity_id: str, year: int, month: int) -> float:
     """Sum daily energy for each day in month via HA history (Month tab)."""
     from calendar import monthrange
@@ -647,15 +654,15 @@ with tab_day:
         day_pred = float(pd.to_numeric(pdf["Predicted"], errors="coerce").fillna(0).sum())
         day_preds.append(0.0 if snow_override else day_pred)
         if ha_configured:
-            day_actuals.append(_ha_day_total_kwh(ha_url, ha_token, ha_entity, ds))
+            day_actuals.append(_ha_day_total_kwh(ha_url, ha_token, FSP_LIVE_POWER_ENTITY, ds))
         else:
             day_actuals.append(0.0)
     day_actuals = [float(_safe_numeric(x)) for x in day_actuals]
     day_preds = [float(_safe_numeric(x)) for x in day_preds]
     fig_day = go.Figure()
     fig_day.add_trace(go.Bar(x=[d.strftime("%a %d") for d in day_dates], y=day_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
-    fig_day.add_trace(go.Bar(x=[d.strftime("%a %d") for d in day_dates], y=day_actuals, name="Actual (HA)", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
-    max_yield = max(7.5, max(day_actuals or [0]), max(day_preds or [0]), 0.01)
+    fig_day.add_trace(go.Bar(x=[d.strftime("%a %d") for d in day_dates], y=day_actuals, name="Actual (FSP)", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
+    max_yield = max(max(day_actuals or [0]), max(day_preds or [0]), 0.01)
     fig_day.update_yaxes(range=[0, max_yield], fixedrange=True, nticks=4, title_text="Yield (kWh)")
     fig_day.update_layout(
         template="plotly_dark",
@@ -666,7 +673,14 @@ with tab_day:
         hovermode="x unified",
         margin=dict(l=48, r=0, t=24, b=48),
         height=320,
-        xaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+        xaxis=dict(
+            gridcolor="rgba(255,255,255,0.08)",
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikethickness=1,
+            spikedash="solid",
+        ),
         yaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.5, xanchor="center"),
     )
@@ -686,7 +700,7 @@ with tab_month:
         else:
             month_preds.append(0.0)
         if ha_configured:
-            month_actuals.append(_ha_month_total_kwh(ha_url, ha_token, ha_entity, y, m))
+            month_actuals.append(_ha_month_total_kwh(ha_url, ha_token, FSP_LIVE_POWER_ENTITY, y, m))
         else:
             month_actuals.append(daily_total_kwh if (y == now.year and m == now.month) else 0.0)
         m -= 1
@@ -697,8 +711,8 @@ with tab_month:
     month_preds.reverse()
     fig_month = go.Figure()
     fig_month.add_trace(go.Bar(x=month_labels, y=month_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
-    fig_month.add_trace(go.Bar(x=month_labels, y=month_actuals, name="Actual (HA)", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
-    max_yield = max(7.5, max(month_actuals or [0]), max(month_preds or [0]), 0.01)
+    fig_month.add_trace(go.Bar(x=month_labels, y=month_actuals, name="Actual (FSP)", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
+    max_yield = max(max(month_actuals or [0]), max(month_preds or [0]), 0.01)
     fig_month.update_yaxes(range=[0, max_yield], fixedrange=True, nticks=4, title_text="Yield (kWh)")
     fig_month.update_layout(
         template="plotly_dark",
@@ -709,7 +723,15 @@ with tab_month:
         hovermode="x unified",
         margin=dict(l=48, r=0, t=24, b=80),
         height=320,
-        xaxis=dict(gridcolor="rgba(255,255,255,0.08)", tickangle=-45),
+        xaxis=dict(
+            gridcolor="rgba(255,255,255,0.08)",
+            tickangle=-45,
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikethickness=1,
+            spikedash="solid",
+        ),
         yaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.5, xanchor="center"),
     )
@@ -723,7 +745,7 @@ with tab_year:
     if ha_configured:
         for i, yr in enumerate([now.year - 2, now.year - 1, now.year]):
             for mo in range(1, 13):
-                year_actuals[i] += _ha_month_total_kwh(ha_url, ha_token, ha_entity, yr, mo)
+                year_actuals[i] += _ha_month_total_kwh(ha_url, ha_token, FSP_LIVE_POWER_ENTITY, yr, mo)
         if now.year in [now.year - 2, now.year - 1, now.year]:
             idx = [now.year - 2, now.year - 1, now.year].index(now.year)
             year_actuals[idx] = max(year_actuals[idx], daily_total_kwh)
@@ -732,8 +754,8 @@ with tab_year:
     year_preds[2] = 0.0 if snow_override else (pred_total_kwh if selected_date.year == now.year else 0.0)
     fig_year = go.Figure()
     fig_year.add_trace(go.Bar(x=year_labels, y=year_preds, name="Predicted", marker=dict(color=PREDICTED_COLOR, line=dict(color="black", width=1)), opacity=0.5))
-    fig_year.add_trace(go.Bar(x=year_labels, y=year_actuals, name="Actual (HA)", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
-    max_yield = max(7.5, max(year_actuals or [0]), max(year_preds or [0]), 0.01)
+    fig_year.add_trace(go.Bar(x=year_labels, y=year_actuals, name="Actual (FSP)", marker=dict(color=ACTUAL_COLOR, line=dict(color="black", width=1)), opacity=0.8))
+    max_yield = max(max(year_actuals or [0]), max(year_preds or [0]), 0.01)
     fig_year.update_yaxes(range=[0, max_yield], fixedrange=True, nticks=4, title_text="Yield (kWh)")
     fig_year.update_layout(
         template="plotly_dark",
@@ -744,7 +766,14 @@ with tab_year:
         hovermode="x unified",
         margin=dict(l=48, r=0, t=24, b=48),
         height=320,
-        xaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+        xaxis=dict(
+            gridcolor="rgba(255,255,255,0.08)",
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikethickness=1,
+            spikedash="solid",
+        ),
         yaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.5, xanchor="center"),
     )
