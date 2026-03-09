@@ -139,4 +139,4 @@ fig.update_layout(
     hovermode="x unified",
 )
 
-st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': 'hover'})
+st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True, 'scrollZoom': True})
