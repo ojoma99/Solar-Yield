@@ -90,8 +90,19 @@ if not history.empty:
 
 # Plotting
 fig = go.Figure()
-fig.add_trace(go.Area(x=df['time'], y=df['Predicted'], name="Predicted", fill='tozeroy', marker_color='#00FF41', opacity=0.3))
-fig.add_trace(go.Bar(x=df['time'], y=df['Actual'], name="Actual", marker_color='#FFFF00'))
+# Plotly has no go.Area trace type; use Scatter with fill='tozeroy' for the predicted band
+fig.add_trace(
+    go.Scatter(
+        x=df['time'],
+        y=df['Predicted'],
+        name="Predicted",
+        mode="lines",
+        fill="tozeroy",
+        line=dict(color="#00FF41"),
+        opacity=0.3,
+    )
+)
+fig.add_trace(go.Bar(x=df['time'], y=df.get('Actual', pd.Series([0]*len(df))), name="Actual", marker_color='#FFFF00'))
 
 # DYNAMIC SCALING: Zoom to the highest data point + 10%
 max_y = max(df['Predicted'].max(), df['Actual'].max(), 0.5)
