@@ -10,8 +10,11 @@ import requests
 load_dotenv()
 HA_URL = os.getenv("HA_URL")
 HA_TOKEN = os.getenv("HA_TOKEN")
-# Using the internal wattage sensor for maximum accuracy
-HA_POWER_ENTITY = "sensor.fsp0e3304v_internal_wattage" 
+# Using both inverter inputs for live HUD wattage
+HA_INPUT_1_ENTITY = "sensor.fsp_input_1_wattage"
+HA_INPUT_2_ENTITY = "sensor.fsp_input_2_wattage"
+# Keep internal wattage sensor for historical chart data
+HA_POWER_ENTITY = "sensor.fsp0e3304v_internal_wattage"
 HA_TODAY_ENTITY = "sensor.fsp0e3304v_today_yield" # Adjust if your yield sensor name differs
 
 st.set_page_config(page_title="Abamu Sovereign Solar", layout="wide", initial_sidebar_state="collapsed")
@@ -24,6 +27,21 @@ def get_ha_state(entity_id):
         return response.json().get('state')
     except:
         return "0"
+
+def fetch_raw_data():
+    # Fetch both strings from your FSP inverter
+    in1 = get_ha_state(HA_INPUT_1_ENTITY)
+    in2 = get_ha_state(HA_INPUT_2_ENTITY)
+
+    # Convert to float and sum them
+    try:
+        val1 = float(in1) if in1 not in [None, "unknown", "unavailable"] else 0.0
+        val2 = float(in2) if in2 not in [None, "unknown", "unavailable"] else 0.0
+        total_live = (val1 + val2) / 1000  # Convert W to kW for the HUD
+    except (TypeError, ValueError):
+        total_live = 0.0
+
+    return total_live
 
 def get_ha_history(entity_id, hours=24):
     headers = {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}
@@ -63,11 +81,7 @@ def calculate_physics_prediction(timestamp):
 st.title("⚓ Abamu Sovereign Solar")
 
 # Real-time HUD
-live_val = get_ha_state(HA_POWER_ENTITY)
-try:
-    live_kw = float(live_val) / 1000 if float(live_val) > 10 else 0.0
-except:
-    live_kw = 0.0
+live_kw = fetch_raw_data()
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Live Production", f"{live_kw:.2f} kW", delta=None)
