@@ -83,10 +83,24 @@ df['Predicted'] = df['time'].apply(calculate_physics_prediction)
 
 # Fetch and Merge Actuals
 history = get_ha_history(HA_POWER_ENTITY, hours=12)
+
+# Ensure the 'Actual' column exists in df even if history is empty
 if not history.empty:
-    df['time'] = df['time'].dt.tz_localize(None)
-    df = pd.merge_asof(df.sort_values('time'), history.sort_values('time'), on='time', direction='nearest')
-    df['Actual'] = df['Actual'] / 1000 # Convert W to kW
+    df['time'] = pd.to_datetime(df['time']).dt.tz_localize(None)
+    history['time'] = pd.to_datetime(history['time']).dt.tz_localize(None)
+
+    # Sort both for merge_asof
+    df = df.sort_values('time')
+    history = history.sort_values('time')
+
+    df = pd.merge_asof(df, history, on='time', direction='nearest')
+    df['Actual'] = df['Actual'] / 1000  # Convert W to kW
+else:
+    # Fallback if no history is found
+    df['Actual'] = 0.0
+
+# Ensure no NaNs are left to break the max() calculation
+df['Actual'] = df['Actual'].fillna(0.0)
 
 # Plotting
 fig = go.Figure()
@@ -102,7 +116,7 @@ fig.add_trace(
         opacity=0.3,
     )
 )
-fig.add_trace(go.Bar(x=df['time'], y=df.get('Actual', pd.Series([0]*len(df))), name="Actual", marker_color='#FFFF00'))
+fig.add_trace(go.Bar(x=df['time'], y=df['Actual'], name="Actual", marker_color='#FFFF00'))
 
 # DYNAMIC SCALING: Zoom to the highest data point + 10%
 max_y = max(df['Predicted'].max(), df['Actual'].max(), 0.5)
