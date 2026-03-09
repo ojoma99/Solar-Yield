@@ -123,9 +123,20 @@ max_y = max(df['Predicted'].max(), df['Actual'].max(), 0.5)
 fig.update_layout(
     template="plotly_dark",
     yaxis=dict(range=[0, max_y * 1.1], title="kW"),
-    margin=dict(l=20, r=20, t=20, b=20),
-    height=400,
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    # 1. Increase top margin to make room for the modebar/zoom tools
+    margin=dict(l=20, r=20, t=60, b=20),
+    height=450,
+    # 2. Legend at top-right, clear of the bars
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=1.05,
+        xanchor="right",
+        x=1,
+    ),
+    # Enable smooth zooming/panning without overlapping UI
+    dragmode="pan",
+    hovermode="x unified",
 )
 
 st.plotly_chart(fig, use_container_width=True)
