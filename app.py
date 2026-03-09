@@ -25,6 +25,15 @@ def get_ha_state(entity_id):
     except:
         return "0"
 
+def fetch_raw_data():
+    raw = get_ha_state(HA_POWER_ENTITY)
+    try:
+        # FSP internal wattage is usually in Watts, we want kW for the HUD
+        val = float(raw) if raw not in [None, 'unknown', 'unavailable'] else 0.0
+        return val / 1000.0
+    except (ValueError, TypeError):
+        return 0.0
+
 def get_ha_history(entity_id, hours=24):
     headers = {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}
     start_time = (datetime.now() - timedelta(hours=hours)).isoformat()
@@ -63,11 +72,7 @@ def calculate_physics_prediction(timestamp):
 st.title("⚓ Abamu Sovereign Solar")
 
 # Real-time HUD
-live_val = get_ha_state(HA_POWER_ENTITY)
-try:
-    live_kw = float(live_val) / 1000 if float(live_val) > 10 else 0.0
-except:
-    live_kw = 0.0
+live_kw = fetch_raw_data()
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Live Production", f"{live_kw:.2f} kW", delta=None)
