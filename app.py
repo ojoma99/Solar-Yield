@@ -11,8 +11,8 @@ load_dotenv()
 HA_URL = os.getenv("HA_URL")
 HA_TOKEN = os.getenv("HA_TOKEN")
 # Using the internal wattage sensor for maximum accuracy
-HA_POWER_ENTITY = "sensor.fsp0e3304v_internal_wattage" 
-HA_TODAY_ENTITY = "sensor.fsp0e3304v_today_yield" # Adjust if your yield sensor name differs
+HA_POWER_ENTITY = "sensor.fsp0e3304v_internal_wattage"
+HA_TODAY_ENTITY = "sensor.fsp0e3304v_energy_today"
 
 st.set_page_config(page_title="Abamu Sovereign Solar", layout="wide", initial_sidebar_state="collapsed")
 
