@@ -14,7 +14,7 @@ HA_TOKEN = os.getenv("HA_TOKEN")
 HA_POWER_ENTITY = "sensor.fsp0e3304v_internal_wattage"
 HA_TODAY_ENTITY = "sensor.fsp0e3304v_energy_today"
 
-st.set_page_config(page_title="Abamu Sovereign Solar", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Abamu Solar", layout="wide", initial_sidebar_state="collapsed")
 
 # 2. DATA FETCHING (SOVEREIGN BRIDGE)
 def get_ha_state(entity_id):
@@ -60,7 +60,7 @@ def calculate_physics_prediction(timestamp):
     return potential * 0.88
 
 # 4. DASHBOARD UI
-st.title("⚓ Abamu Sovereign Solar")
+st.title("⚓ Abamu Solar")
 
 # Real-time HUD base values
 live_val = get_ha_state(HA_POWER_ENTITY)
