@@ -111,6 +111,12 @@ else:
 # Ensure no NaNs are left to break the max() calculation
 df['Actual'] = df['Actual'].fillna(0.0)
 
+# Get the current time in the same format as your dataframe (timezone-naive)
+now = pd.Timestamp.now().replace(tzinfo=None)
+
+# Filter the dataframe to only include rows up to right now
+df_current = df[df['time'] <= now].copy()
+
 # 7. HUD LAYOUT (two rows, high-density)
 # Row 1: Instantaneous Power
 col1, col2 = st.columns(2)
@@ -140,10 +146,10 @@ fig.add_trace(
 # Only show Actual bars for timestamps up to \"now\" to avoid future projections from HA history
 now_ts = datetime.now()
 actual_masked = df['Actual'].where(df['time'] <= now_ts, 0.0)
-fig.add_trace(go.Bar(x=df['time'], y=actual_masked, name="Actual", marker_color='#FFFF00'))
+fig.add_trace(go.Bar(x=df_current['time'], y=df_current['Actual'], name="Actual", marker_color='#FFFF00'))
 
 # DYNAMIC SCALING: Zoom to the highest data point + 10%
-max_y = max(df['Predicted'].max(), df['Actual'].max(), 0.5)
+max_y = max(df['Predicted'].max(), df_current['Actual'].max() if not df_current.empty else 0.0, 0.5)
 fig.update_layout(
     template="plotly_dark",
     yaxis=dict(range=[0, max_y * 1.1], title="kW"),
