@@ -153,14 +153,14 @@ max_y = max(df['Predicted'].max(), df_current['Actual'].max() if not df_current.
 fig.update_layout(
     template="plotly_dark",
     yaxis=dict(range=[0, max_y * 1.1], title="kW"),
-    # 1. Increase top margin to make room for the modebar/zoom tools
-    margin=dict(l=20, r=20, t=60, b=20),
+    # Extra top and bottom margin so modebar and legend never overlap HUD or bars
+    margin=dict(l=20, r=20, t=40, b=80),
     height=450,
-    # 2. Legend at top-right, clear of the bars
+    # Move legend below the chart to avoid clashing with modebar
     legend=dict(
         orientation="h",
-        yanchor="bottom",
-        y=1.05,
+        yanchor="top",
+        y=-0.2,
         xanchor="right",
         x=1,
     ),
