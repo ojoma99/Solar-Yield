@@ -62,26 +62,35 @@ def calculate_physics_prediction(timestamp):
 # 4. DASHBOARD UI
 st.title("⚓ Abamu Sovereign Solar")
 
-# Real-time HUD
+# Real-time HUD base values
 live_val = get_ha_state(HA_POWER_ENTITY)
 try:
     live_kw = float(live_val) / 1000 if float(live_val) > 10 else 0.0
-except:
+except Exception:
     live_kw = 0.0
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Live Production", f"{live_kw:.2f} kW", delta=None)
-col2.metric("Today's Yield", f"{get_ha_state(HA_TODAY_ENTITY)} kWh")
-col3.metric("System Health", "94.2%" if live_kw > 0 else "Sleeping")
+today_val = get_ha_state(HA_TODAY_ENTITY)
+today_kwh = 0.0
+try:
+    today_kwh = float(today_val)
+except Exception:
+    today_kwh = 0.0
 
-# 5. THE CHART (HOUR VIEW)
+# 5. THE CHART (HOUR VIEW) + PHYSICS PREDICTIONS
 # Generate Prediction Time Slots
-times = pd.date_range(start=datetime.now().replace(hour=5, minute=0), 
-                       end=datetime.now().replace(hour=20, minute=0), freq='15Min')
+times = pd.date_range(
+    start=datetime.now().replace(hour=5, minute=0),
+    end=datetime.now().replace(hour=20, minute=0),
+    freq='15Min',
+)
 df = pd.DataFrame({'time': times})
 df['Predicted'] = df['time'].apply(calculate_physics_prediction)
 
-# Fetch and Merge Actuals
+# Physics-based live and daily predictions for HUD
+live_predicted_kw = calculate_physics_prediction(datetime.now())
+today_predicted_kwh = float(df['Predicted'].sum() * (15.0 / 60.0))
+
+# 6. Fetch and Merge Actuals for the chart
 history = get_ha_history(HA_POWER_ENTITY, hours=12)
 
 # Ensure the 'Actual' column exists in df even if history is empty
@@ -101,6 +110,17 @@ else:
 
 # Ensure no NaNs are left to break the max() calculation
 df['Actual'] = df['Actual'].fillna(0.0)
+
+# 7. HUD LAYOUT (two rows, high-density)
+# Row 1: Instantaneous Power
+col1, col2 = st.columns(2)
+col1.metric("Live", f"{live_kw:.2f} kW")
+col2.metric("Live Predicted", f"{live_predicted_kw:.2f} kW")
+
+# Row 2: Today's Accumulation
+col3, col4 = st.columns(2)
+col3.metric("Today", f"{today_kwh:.2f} kWh")
+col4.metric("Today Predicted", f"{today_predicted_kwh:.2f} kWh")
 
 # Plotting
 fig = go.Figure()
