@@ -16,6 +16,11 @@ HA_TODAY_ENTITY = "sensor.fsp0e3304v_energy_today"
 
 st.set_page_config(page_title="Abamu Solar", layout="wide", initial_sidebar_state="collapsed")
 
+# Recalibrated for March Cold-Gain and Albedo
+# Old: 0.14 (14% losses)
+# New: 0.11 (Higher efficiency due to Varel cold air)
+CALIBRATED_LOSS_FACTOR = 0.11
+
 # 2. DATA FETCHING (SOVEREIGN BRIDGE)
 def get_ha_state(entity_id):
     headers = {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}
@@ -56,8 +61,8 @@ def calculate_physics_prediction(timestamp):
     # HORIZON MASK: Before 10:30 AM, Varel horizon/roof shading cuts yield by 70%
     if hour < 10.5:
         return potential * 0.3
-    # SYSTEM LOSS: 12% for cabling, heat, and dust
-    return potential * 0.88
+    # SYSTEM LOSS: Use March-calibrated factor.
+    return potential * (1 - CALIBRATED_LOSS_FACTOR)
 
 # 4. DASHBOARD UI
 st.title("⚓ Abamu Solar")
